@@ -1,0 +1,9 @@
+[submodule "submodules/spoa"]
+	path = submodules/spoa
+	url = https://github.com/rvaser/spoa
+[submodule "submodules/spdlog"]
+	path = submodules/spdlog
+	url = https://github.com/gabime/spdlog
+[submodule "submodules/edlib"]
+	path = submodules/edlib
+	url = https://github.com/Martinsos/edlib

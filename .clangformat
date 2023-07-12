@@ -1,0 +1,6 @@
+BasedOnStyle: Google
+
+---
+Languagg: Cpp
+SpaceAfterCStyleCast: true
+PointerAlignment: Left

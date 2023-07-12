@@ -1,0 +1,17 @@
+.vscode
+core.*
+*.dSYM
+*.out
+build
+data
+include
+kevin
+tools
+result
+
+scripts/correction_tools/canu/canu*
+scripts/correction_tools/canu/tmp*
+scripts/correction_tools/canu/correction
+
+scripts/evaluation/flo/ext
+scripts/evaluation/flo/run
