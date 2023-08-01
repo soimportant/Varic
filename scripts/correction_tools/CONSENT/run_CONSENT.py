@@ -29,7 +29,7 @@ def main():
   if platform == "PacBio" or platform == "HiFi":
     platform = "PB"
   
-  exe="/mnt/ec/ness/yolkee/thesis/tools/CONSENT/CONSENT-correct"
+  exe="/mnt/ec/ness/yolkee/thesis/tools/correction_tools/CONSENT/CONSENT-correct"
   opts=[
     "--in", read,
     "--out", output,
@@ -43,6 +43,10 @@ def main():
   print(f"{TOOL} cmd =", ' '.join(cmd))
   proc = Popen(cmd)
   proc.wait()
+  
+  # remove paf file
+  
+
   if proc.returncode != 0:
     print(f"Error: CONSENT failed with exit code {proc.returncode}")
     exit(-1)

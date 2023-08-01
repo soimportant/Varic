@@ -5,6 +5,7 @@ import sys
 import os
 import argparse
 import shutil
+import gzip
 
 TOOL="Canu"
 
@@ -20,8 +21,8 @@ def main():
   read = os.path.abspath(args.read)
   platform = args.platform
   output = os.path.abspath(args.output)
+  threads = args.threads
   size = args.size
-  size = 4641851
 
   # check argument
   if not os.path.exists(read) or not os.path.isfile(read):
@@ -37,10 +38,11 @@ def main():
   elif platform == "HiFi":
     platform = "-pacbio-hifi"
 
-  exe="/mnt/ec/ness/yolkee/thesis/tools/canu-2.2/bin/canu"
+  exe="/mnt/ec/ness/yolkee/thesis/tools/correction_tools/canu-2.2/bin/canu"
   opts=[
     "-correct",
     f"genomeSize={size}",
+    f"maxThreads={threads}",
     "-p", "tmp"
   ]
   cmd = [exe] + opts + [platform, read]
@@ -53,7 +55,10 @@ def main():
     exit(-1)
 
   # copy result to correct directory
-  shutil.copy("./tmp.correctedReads.fasta.gz", output)
+  canu_output = "./tmp.correctedReads.fasta.gz"
+  with gzip.open(canu_output, "rb") as fin:
+    with open(output, "wb") as fout:
+      shutil.copyfileobj(fin, fout)
 
 if __name__ == "__main__":
   main()

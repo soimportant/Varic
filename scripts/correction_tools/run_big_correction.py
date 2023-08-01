@@ -16,11 +16,15 @@ def get_genome_size(ref):
 
 def main():
   parser = argparse.ArgumentParser(prog="run_correction_tool")
-  parser.add_argument("-r", dest="read", type=str, required=True, help="Path of raw reads")
-  parser.add_argument("--ref", dest="ref", type=str, required=True, help="Path of reference genome of raw reads(Used by Canu)")
-  parser.add_argument("-p", dest="platform", type=str, required=True, choices=["PacBio", "ONT", "HiFi"], help="Platform of raw reads")
-  parser.add_argument("-o", dest="output", type=str, required=True, help="Path of output directory")
-  parser.add_argument("-t", dest="threads", type=int, required=True, help="Number of threads")
+  parser.add_argument("-d",
+                      dest="data_dir", type=str,
+                      required=True,
+                      help="directory containing reads and haplotype")
+  parser.add_argument("-r", "--read",
+                      dest="res_dir", type=str,
+                      required=True,
+                      help="directory containing corrected reads")  
+
   args, unknown = parser.parse_known_args(sys.argv[1:])
 
   read = os.path.abspath(args.read)

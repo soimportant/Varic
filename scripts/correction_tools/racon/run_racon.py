@@ -54,7 +54,7 @@ def main():
     print(f"Error: minimap2 failed with exit code {minimap2_proc.returncode}")
     exit(-1)
 
-  exe="/mnt/ec/ness/yolkee/thesis/tools/racon/build/bin/racon"
+  exe="/mnt/ec/ness/yolkee/thesis/tools/correction_tools/racon/build/bin/racon"
   opts=[
     "-t", str(args.threads),
     read,
