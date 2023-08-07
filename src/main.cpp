@@ -4,6 +4,7 @@
 #include <boost/program_options.hpp>
 #include <spdlog/spdlog.h>
 #include <spoa/spoa.hpp>
+#include <omp.h>
 
 #include "algo/correction.hpp"
 #include "utility/all.hpp"
@@ -31,9 +32,15 @@ auto check_argument(const bpo::variables_map& vmap) {
     spdlog::error("Platform must be PacBio or ONT");
     exit(1);
   }
+  auto thread = vmap["thread"].as<int>();
+  if (thread < 1) {
+    spdlog::error("Thread must be greater than 0");
+    exit(1);
+  }
 }
 
 int main(int argc, char* argv[]) {
+  spdlog::set_level(spdlog::level::trace);
   /**
    * 1. raw reads
    * 2. overlap info
@@ -56,7 +63,10 @@ int main(int argc, char* argv[]) {
         "output_path,o", bpo::value<fs::path>()->required(),
         "the output path of corrected read")(
         "platform,p", bpo::value<std::string>()->default_value("PacBio"),
-        "the sequencing platform of raw reads");
+        "the sequencing platform of raw reads")(
+          "thread,t", bpo::value<int>()->default_value(1),
+          "the number of threads to use"
+        );
     bpo::store(bpo::parse_command_line(argc, argv, opts), vmap);
     bpo::notify(vmap);
     if (vmap.contains("help")) {
@@ -84,9 +94,12 @@ int main(int argc, char* argv[]) {
     }
   }
   auto overlap = read_records<bio::PafRecord>(overlap_path);
+  auto thread = vmap["thread"].as<int>();
+  omp_set_num_threads(thread);
+  
 
   auto start = std::chrono::steady_clock::now();
-  auto correcter = FragmentedReadCorrector(std::move(raw_reads), std::move(overlap), platform);
+  auto correcter = FragmentedReadCorrector(std::move(raw_reads), std::move(overlap), platform, thread);
   auto corrected_read = correcter.correct();
   auto end = std::chrono::steady_clock::now();
 
