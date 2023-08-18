@@ -46,7 +46,6 @@ def main():
   
   # remove paf file
   
-
   if proc.returncode != 0:
     print(f"Error: CONSENT failed with exit code {proc.returncode}")
     exit(-1)

@@ -60,8 +60,8 @@ def main():
   for tool in os.listdir(cwd):
     if not os.path.isdir(cwd + "/" + tool) or tool == "tmp":
       continue
-    if tool != "lorma":
-      continue
+    # if tool != "lorma":
+    #   continue
     cmd = [
       f"{cwd}/{tool}/run_{tool}.py",
       "-r", read,

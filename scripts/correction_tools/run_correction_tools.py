@@ -53,17 +53,16 @@ def main():
     os.mkdir(tmp)
   os.chdir(tmp)
 
+  # TODO: add time and memory usage at output section
   for tool in os.listdir(cwd):
     if not os.path.isdir(cwd + "/" + tool) or tool == "tmp":
-      continue
-    if tool != "lorma":
       continue
     cmd = [
       f"{cwd}/{tool}/run_{tool}.py",
       "-r", read,
       "--ref", ref,
       "-p", platform,
-      "-o", f"{output}/{tool}.fasta",
+      "-o", f"{output}/{tool}/corrected.fasta",
       "-t", str(args.threads),
       "--size", str(size),
     ]
@@ -81,7 +80,7 @@ def main():
     print(f"{tool} done", end="\n===========================================\n")
   
   # delete all file in current folder exclude this file and directory
-  shutil.rmtree(tmp, ignore_errors=True)
+  # shutil.rmtree(tmp, ignore_errors=True)
 
 if __name__ == "__main__":
   main()
