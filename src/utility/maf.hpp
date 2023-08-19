@@ -74,7 +74,7 @@ std::istream& operator>>(std::istream& is, MafRecord& r) {
 
 auto read_maf(const fs::path& path) {
   auto fin = std::ifstream(path);
-  spdlog::info("Read maf records from {} ...", path.string());
+  spdlog::info("Read maf records from \"{}\" ...", path.string());
   bio::MafHeader h;
   fin >> h;
   std::vector<bio::MafRecord> records;

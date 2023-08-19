@@ -92,7 +92,8 @@ public:
   BaseReadCorrector(std::vector<bio::FastaRecord<false>>&& raw_reads,
                     std::vector<bio::PafRecord>&& overlaps,
                     const std::string& platform,
-                    const int thread_num = std::thread::hardware_concurrency())
+                    const int thread_num = std::thread::hardware_concurrency(),
+                    bool debug = false)
       : raw_reads(raw_reads), overlaps(overlaps), platform(platform) {
 
     unfiltered_raw_read_size = raw_reads.size();
@@ -106,6 +107,7 @@ public:
     this->overlaps = overlap_preprocess(this->raw_reads, overlaps);
     overlaps_size = this->overlaps.size();
     threads = thread_num;
+    this->debug = debug;
     print_info();
   }
 
@@ -117,6 +119,7 @@ public:
     spdlog::info("Platform: {}", platform);
     spdlog::info("Filtered raw reads: {}", raw_read_size);
     spdlog::info("Filtered overlaps: {}", overlaps_size);
+    spdlog::info("Debug mode is {}", debug ? "on" : "off");
   }
 
 protected:
@@ -144,6 +147,9 @@ protected:
 
   /* threads */
   std::size_t threads;
+
+  /* debug */
+  bool debug = false;
 };
 
 class FragmentedReadCorrector : public BaseReadCorrector {
@@ -160,10 +166,7 @@ public:
     // extend length of overlap region
     static const auto overlap_extend_len = 25ul;
 
-    
-
     /* backbone read information */
-    std::size_t read_idx;
     std::size_t idxL, idxR;
     std::string backbone_seq;
 
@@ -248,8 +251,7 @@ public:
             std::min((widx + 1) * Window::window_len - 1, overlap.qlen - 1);
         auto tidxL = std::min(tstart + (qidxL - qstart), overlap.tlen - 1);
         auto tidxR = tstart + (qidxR - qstart);
-        boundary.emplace_back(
-            std::make_pair(widx, std::make_pair(tidxL, tidxR)));
+        boundary.emplace_back(widx, std::make_pair(tidxL, tidxR));
       }
 
       /* extend boundaries for making adjanency window have overlap */
@@ -323,7 +325,8 @@ public:
       reads[i].idx = name2id[reads[i].name];
       /* initial read */
     }
-    std::mt19937 rng(42);
+    // std::mt19937 rng(42);
+    // std::ranges::shuffle(reads, rng);
   }
 
   auto correct() {
@@ -351,16 +354,41 @@ public:
     //   spdlog::info("msa seq = {}", it);
     // }
 
-    for (auto& raw_read : reads) {
+    auto takes = debug ? 1 : std::numeric_limits<std::size_t>::max();
+    
+    for (auto& raw_read : reads | std::views::take(takes)) {
       auto windows = make_windows(raw_read);
       spdlog::info("read name = {}, seq size = {}", raw_read.name,
                    raw_read.seq.size());
       spdlog::info("windows.size() = {}", windows.size());
 
       auto seq_cnt = 0;
-      for (const auto& w : windows) {
+      for (const auto& w : windows | std::views::take(takes)) {
         seq_cnt += w.overlap_seqs.size();
-      
+        
+        // 1. build de burjin graph
+        // 2. msa then use spoa graph
+        // try to find some pruning policy for doing this.
+        // + prune without realignment
+        // 
+        {
+          auto alignment_engine =
+              spoa::AlignmentEngine::Create(spoa::AlignmentType::kNW, 3, -5,
+                                            -3);
+          auto graph = spoa::Graph{};
+          for (const auto &seq : w.overlap_seqs) {
+            auto alignment = alignment_engine->Align(seq, graph);
+            graph.AddAlignment(alignment, seq);
+          }
+
+        }
+
+        
+        /**
+         * 
+         * 
+         */
+
         /* do msa here */
         // auto alignment_engine =
         //     spoa::AlignmentEngine::Create(spoa::AlignmentType::kNW, 3, -5,

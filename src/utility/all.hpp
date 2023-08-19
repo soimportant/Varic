@@ -5,3 +5,5 @@
 #include "paf.hpp"
 #include "maf.hpp"
 #include "vcf.hpp"
+#include "haplotype.hpp"
+#include "threadpool/threadpool.hpp"
