@@ -1,6 +1,3 @@
-[submodule "submodules/spoa"]
-	path = submodules/spoa
-	url = https://github.com/rvaser/spoa
 [submodule "submodules/spdlog"]
 	path = submodules/spdlog
 	url = https://github.com/gabime/spdlog
