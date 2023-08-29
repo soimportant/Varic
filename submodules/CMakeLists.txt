@@ -1,7 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
 
-# spoa
-add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/spoa)
 
 # spdlog
 if(NOT TARGET spdlog)

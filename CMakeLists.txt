@@ -13,6 +13,11 @@ set(CMAKE_BUILD_TYPE Debug)
 # biovoltron
 set(BIOVOLTRON_TESTS OFF)
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/include/biovoltron)
+
+# spoa
+add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/include/spoa)
+
+# submodules
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/submodules)
 
 find_package(Boost COMPONENTS program_options thread graph system filesystem REQUIRED)
@@ -22,11 +27,11 @@ link_libraries(spdlog spoa::spoa ${Boost_LIBRARIES} biovoltron edlib OpenMP::Ope
 include_directories(${CMAKE_CURRENT_LIST_DIR}/submodules/edlib/edlib/include)
 
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-  # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -g -Wall -Wextra")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -g -Wall -Wextra -lcurl -fsanitize=undefined -fsanitize=address")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -g -Wall -Wextra")
+  # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -g -Wall -Wextra -lcurl -fsanitize=undefined -fsanitize=address")
   add_compile_definitions(DEBUG)
 else()
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Ofast")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Ofast")
 endif()
 
 add_compile_definitions(DATA_PATH="/mnt/ec/mammoth/yolkee/thesis/data"

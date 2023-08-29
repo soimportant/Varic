@@ -8,6 +8,7 @@ include
 kevin
 tools
 result
+tests/tmp
 
 scripts/correction_tools/tmp
 scripts/evaluation/flo

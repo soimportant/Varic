@@ -61,6 +61,25 @@ public:
     return 1 - precision();
   }
 
+  /* operator + */
+  ConfusionMatrix operator+ (const ConfusionMatrix& mat) const {
+    ConfusionMatrix ret;
+    ret.tp = tp + mat.tp;
+    ret.tn = tn + mat.tn;
+    ret.fp = fp + mat.fp;
+    ret.fn = fn + mat.fn;
+    return ret;
+  }
+
+  /* operator += */
+  ConfusionMatrix& operator+= (const ConfusionMatrix& mat) {
+    tp += mat.tp;
+    tn += mat.tn;
+    fp += mat.fp;
+    fn += mat.fn;
+    return *this;
+  }
+
   friend auto operator<< (std::ostream& os, const ConfusionMatrix& mat) {
     os << std::setw(6);
     os << "tp: " << mat.tp << '\t';
@@ -69,6 +88,7 @@ public:
     os << "fn: " << mat.fn << '\n';
     return os;
   }
+
 };
 
 /* create operator << for output confusion matrix */
