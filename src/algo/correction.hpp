@@ -4,17 +4,20 @@
 #include <concepts>
 #include <execution>
 #include <map>
+#include <mutex>
+#include <random>
 #include <ranges>
 #include <string>
 #include <thread>
 #include <vector>
-#include <random>
 
 #include <biovoltron/file_io/all.hpp>
 #include <spdlog/spdlog.h>
+#include <spoa/spoa.hpp>
 
 // ! ugly solution, fix it later
 #include "../utility/all.hpp"
+#include "assembler.hpp"
 
 class BaseReadCorrector {
 
@@ -55,18 +58,31 @@ private:
         "raw_reads must be sorted by name");
     spdlog::info("Overlap proprecessing...");
 
+    const auto min_overlap_length = 1000ull;
+    // In original .paf file of overlaps between raw_reads, the match base
+    // devided by alignment length is very low, figure out how it be computed
+    // and why it is so low.
+    // const auto min_overlap_identity = 0.7l;
     auto valid_overlap = [&](const bio::PafRecord& overlap) {
       auto valid_read = [&](const std::string_view name) {
         return std::ranges::binary_search(raw_reads, name, {},
                                           &bio::FastaRecord<false>::name);
       };
-      bool valid = valid_read(overlap.qname) && valid_read(overlap.tname);
-      /* filter gogogo */
-      return valid;
+      if (!valid_read(overlap.qname) || !valid_read(overlap.tname)) {
+        return false;
+      }
+      if (overlap.qname == overlap.tname) {
+        return false;
+      }
+      if (overlap.aln_len < min_overlap_length) {
+        return false;
+      }
+      // if (overlap.aln_len * min_overlap_identity > overlap.match) {
+      //   return false;
+      // }
+      return true;
     };
 
-    const auto min_overlap_length = 1000ull;
-    const auto min_overlap_identity = 0.8;
     auto filtered_overlaps = std::vector<bio::PafRecord>{};
 
     /* there's no std::ranges::move_if(), so sad */
@@ -158,13 +174,25 @@ public:
 
   class Window {
   public:
+    Window() = default;
+
+    // delete copy constructor and copy assignment
+    Window(const Window&) = delete;
+    Window& operator=(const Window&) = delete;
+
+    // default move constructor and move assignment
+    Window(Window&&) = default;
+    Window& operator=(Window&&) = default;
+
     // basic length of a window
     static const auto window_len = 500ul;
     // overlap length of adjanency window. Therefore, typeical length of a
     // single window should be window_len + 2 * window_overlap_len
     static const auto window_overlap_len = 50ul;
-    // extend length of overlap region
+    // extend length of overlap
     static const auto overlap_extend_len = 25ul;
+    // minimum length of overlap
+    static const auto overlap_min_len = window_len - window_overlap_len;
 
     /* backbone read information */
     std::size_t idxL, idxR;
@@ -174,18 +202,52 @@ public:
     std::vector<std::size_t> overlap_read_idx;
     std::vector<std::pair<std::size_t, std::size_t>> overlap_boundaries;
     std::vector<std::string> overlap_seqs;
+    std::vector<bool> overlap_strains;
+
+    spoa::Graph graph;
+
+    auto get_prune_len() const noexcept -> std::size_t {
+      auto len = backbone_seq.size();
+      return len;
+    }
+
+    auto print() const noexcept {
+      spdlog::debug("idxL = {}, idxR = {}", idxL, idxR);
+      spdlog::debug("backbone_seq.size() = {}", backbone_seq.size());
+      auto sum = std::accumulate(overlap_seqs.begin(), overlap_seqs.end(), 0ul,
+                                 [](auto a, auto& b) { return a + b.size(); });
+      spdlog::debug("average overlap_seqs len = {}", sum / overlap_seqs.size());
+      spdlog::debug("get prune len = {}", get_prune_len());
+    }
   };
 
-  class Read : public bio::FastaRecord<false> {
+  class Read : public bio::FastqRecord<false> {
   public:
-    // coverage -> segment tree like data structure
+    Read() = default;
 
-    // collect correct seqs from other reads
-    // may further assemble to correct version of this read
+    // disable copy constructor and copy assignment
+    Read(const Read&) = delete;
+    Read& operator=(const Read&) = delete;
+
+    // default move constructor and move assignment
+    Read(Read&&) = default;
+    Read& operator=(Read&&) = default;
+
+    // TODO: coverage -> segment tree like data structure
+    // ? we may add a data structure here for recording the coverage covered
+    // ? by corrected_fragments, if the coverage is enough, we can assemble
+    // ? the corrected read without building MSA.
+
     std::size_t idx;
+
+    // reverse complement sequence
     std::string rc_seq;
+
+    // correct seqs from windows of others reads, may further assemble to
+    // correct version of this read
     std::vector<std::string> corrected_fragments;
 
+    // windows of this read
     std::vector<Window> windows;
   };
 
@@ -196,14 +258,11 @@ public:
    * @return std::range::range
    */
   std::ranges::range auto get_overlap_range(const std::string_view read_name) {
-    static auto idxR = 0u;
-    auto st = idxR;
-    while (idxR < overlaps.size() && overlaps[idxR].qname == read_name) {
-      ++idxR;
-    }
-    // assert(idxR > st && "No overlap on this read");
-    return std::ranges::subrange(overlaps.begin() + st,
-                                 overlaps.begin() + idxR);
+    auto st = std::ranges::lower_bound(overlaps, read_name, {},
+                                       &bio::PafRecord::qname);
+    auto ed = std::ranges::upper_bound(overlaps, read_name, {},
+                                       &bio::PafRecord::qname);
+    return std::ranges::subrange(st, ed);
   }
 
   /**
@@ -215,16 +274,12 @@ public:
    * @return std::vector<Window>
    */
   auto make_windows(const Read& raw_read) {
-
     auto windows = std::vector<Window>{};
 
     /* get all overlap of this read */
     for (const auto& overlap : get_overlap_range(raw_read.name)) {
-      std::stringstream ss;
-      ss << overlap;
-
-      /* target boundaries information */
-      auto boundary = std::vector<
+      /* boundaries information of target read -> (widx, (lbound, rbound)) */
+      auto boundaries = std::vector<
           std::pair<std::size_t, std::pair<std::size_t, std::size_t>>>{};
       auto tid = name2id[overlap.tname];
 
@@ -234,69 +289,127 @@ public:
                         : 0ul;
       auto qend =
           std::min(overlap.qlen - 1, overlap.qend + Window::overlap_extend_len);
-      auto qlen = qend - qstart + 1;
 
       auto tstart = overlap.tstart > Window::overlap_extend_len
                         ? overlap.tstart - Window::overlap_extend_len
                         : 0ul;
       auto tend =
           std::min(overlap.tlen - 1, overlap.tend + Window::overlap_extend_len);
-      auto tlen = tend - tstart + 1;
 
-      /* set initial boundary */
-      for (auto widx = qstart / Window::window_len;
-           widx * Window::window_len < qend; ++widx) {
-        auto qidxL = std::max(qstart, widx * Window::window_len);
-        auto qidxR =
-            std::min((widx + 1) * Window::window_len - 1, overlap.qlen - 1);
-        auto tidxL = std::min(tstart + (qidxL - qstart), overlap.tlen - 1);
-        auto tidxR = tstart + (qidxR - qstart);
-        boundary.emplace_back(widx, std::make_pair(tidxL, tidxR));
-      }
+      /* initialize boundaries */
+      auto init_boundaries = [&]() {
+        for (auto widx = qstart / Window::window_len;
+             widx * Window::window_len < qend; ++widx) {
+          auto qidxL = std::max(qstart, widx * Window::window_len);
+          auto qidxR = std::min((widx + 1) * Window::window_len - 1, qend);
+          auto tidxL = std::min(tstart + (qidxL - qstart), tend);
+          auto tidxR = std::min(tstart + (qidxR - qstart), tend);
+          if (tidxL == tidxR) {
+            continue;
+          }
+          boundaries.emplace_back(widx, std::make_pair(tidxL, tidxR));
+        }
+      };
+
+      /**
+       * adjust boundaries according to length difference between query
+       * sequence and target sequence
+       */
+      auto adjust_boundaries = [&]() {
+        auto len_diff = (std::int64_t)(tend - tstart + 1) -
+                        (std::int64_t)(qend - qstart + 1);
+        auto offset = len_diff / (std::int64_t) boundaries.size();
+        for (auto i = 1u; i < boundaries.size(); i++) {
+          auto& prev_tidxR = boundaries[i - 1].second.second;
+          auto& curr_tidxL = boundaries[i].second.first;
+
+          // do this way for avoiding unsigned integer underflow
+          // I don't want to debug...
+          if (offset >= 0) {
+            prev_tidxR = std::min(prev_tidxR + offset * i, tend);
+            curr_tidxL = std::min(curr_tidxL + offset * i, tend);
+          } else {
+            auto n_offset = -offset;
+            prev_tidxR =
+                (prev_tidxR > n_offset * i) ? prev_tidxR - n_offset * i : 0ul;
+            curr_tidxL =
+                (curr_tidxL > n_offset * i) ? curr_tidxL - n_offset * i : 0ul;
+          }
+        }
+        auto& [last_tidxL, last_tidxR] = boundaries.back().second;
+        last_tidxR = std::min(last_tidxR + len_diff, tend);
+        if (last_tidxR <= last_tidxL) {
+          boundaries.pop_back();
+        }
+      };
 
       /* extend boundaries for making adjanency window have overlap */
-      std::ranges::for_each(boundary, [&](auto& b) {
-        auto& [_, tidx] = b;
-        auto& [tidxL, tidxR] = tidx;
-        tidxL = tidxL > Window::window_overlap_len
-                    ? tidxL - Window::window_overlap_len
-                    : 0;
-        assert(tidxL < reads[tid].seq.size() && "tidxL out of range");
-        tidxR = std::min(tidxR + Window::window_overlap_len, overlap.tlen - 1);
-      });
+      auto extend_boundaries = [&]() {
+        std::ranges::for_each(boundaries, [&](auto& boundary) {
+          auto& [_, tidx] = boundary;
+          auto& [tidxL, tidxR] = tidx;
+          /* cannot use std::min due to unsigned integer subtraction */
+          tidxL = tidxL > Window::window_overlap_len
+                      ? tidxL - Window::window_overlap_len
+                      : 0ul;
+          tidxR = std::min(tidxR + Window::window_overlap_len, tend);
+        });
+      };
 
-      /* adjust boundaries by length difference */
-      auto len_diff = (std::int64_t) (qlen - tlen);
-      auto offset = len_diff / (std::int64_t) boundary.size();
-      for (auto i = 1; i < (int) boundary.size(); i++) {
-        boundary[i - 1].second.second += offset * i;
-      }
-      boundary.back().second.second =
-          std::min(boundary.back().second.second + len_diff, tlen - 1);
+      auto print = [&]() {
+        std::stringstream ss;
+        ss << overlap;
+        spdlog::debug("{}", ss.str());
+        auto len_diff = (std::int64_t)(tend - tstart + 1) -
+                        (std::int64_t)(qend - qstart + 1);
+        auto offset = len_diff / (std::int64_t) boundaries.size();
+        spdlog::debug("len_diff = {}, offset = {}", len_diff, offset);
+        for (auto& [widx, tidx] : boundaries) {
+          spdlog::debug("widx = {}, tidxL = {}, tidxR = {}", widx,
+          tidx.first,
+                        tidx.second);
+        }
+      };
 
       /* push sequence into window */
-      for (const auto& [widx, tidx] : boundary) {
-        if (widx >= windows.size()) {
-          windows.resize(widx + 1);
+      auto push_sequence = [&]() {
+        for (const auto& [widx, tidx] : boundaries) {
+          while (widx >= windows.size()) {
+            windows.emplace_back(Window{});
+          }
+          auto forward_strain = (overlap.strand == '+');
+          auto tseq = std::string_view{};
+          tseq = forward_strain ? reads[tid].seq : reads[tid].rc_seq;
+          auto [tidxL, tidxR] = tidx;
+          if (tidxL > tidxR) {
+            print();
+          }
+          assert(tidxL <= tidxR && "wrong boundary");
+          assert(tidxL < tend && "tidxL out of range");
+
+          auto subseq = tseq.substr(tidxL, tidxR - tidxL + 1);
+          assert(subseq.size() < Window::window_len * 2 &&
+                 "overlap sequence too long");
+          if (subseq.size() < Window::overlap_min_len) {
+            continue;
+          }
+          // TODO: Directly push sequence into graph
+          windows[widx].overlap_read_idx.emplace_back(tid);
+          windows[widx].overlap_boundaries.emplace_back(tidxL, tidxR);
+          windows[widx].overlap_seqs.emplace_back(std::move(subseq));
+          windows[widx].overlap_strains.emplace_back(forward_strain);
         }
-        auto tseq = std::string_view{};
-        tseq = (overlap.strand == '+') ? reads[tid].seq
-                                       : reads[tid].rc_seq;
-        auto [tidxL, tidxR] = tidx;
+      };
 
-        // TODO: set a filter here, for the sequence which length is less than
-        // TODO: some value here, drop it.
-
-        windows[widx].overlap_read_idx.push_back(tid);
-        windows[widx].overlap_boundaries.emplace_back(tidxL, tidxR);
-        windows[widx].overlap_seqs.emplace_back(
-            tseq.substr(tidxL, tidxR - tidxL + 1));
-      }
+      init_boundaries();
+      adjust_boundaries();
+      extend_boundaries();
+      push_sequence();
     }
 
     // ? if the overlap strand == '-', should we keep this information for
     // ? assemble the correcetd read, since the strand == '-', that means the
-    // ? consensus produce by this read, would be the reverse complement of 
+    // ? consensus produce by this read, would be the reverse complement of
     // ? the target read, then we need to use this instead.
 
     /* set backbone sequence */
@@ -312,10 +425,13 @@ public:
       windows[widx].idxR = idxR;
       windows[widx].backbone_seq = raw_read.seq.substr(idxL, idxR - idxL + 1);
     }
-
     return windows;
   }
 
+  /**
+   * @brief initialize read
+   * @return void
+   */
   auto make_reads() {
     reads.resize(raw_read_size);
     for (auto i : std::views::iota(0ul, raw_read_size)) {
@@ -325,94 +441,242 @@ public:
       reads[i].idx = name2id[reads[i].name];
       /* initial read */
     }
-    // std::mt19937 rng(42);
-    // std::ranges::shuffle(reads, rng);
+    // TODO: shuffle read
+    // std::random_shuffle(reads.begin(), reads.end());
   }
 
+
   auto correct() {
-    make_reads();
-    auto mn = std::numeric_limits<std::size_t>::max();
-    auto mx = std::numeric_limits<std::size_t>::min();
-    auto cnt = 0u;
+    constexpr auto WINDOW_IN_BATCH = 1500ul;
+    auto threadpool = bio::make_threadpool(threads);
 
-    // /* try using spoa */
+    auto get_global_alignment_engine = [&](const std::size_t max_length) {
+      auto engine = spoa::AlignmentEngine::Create(
+          spoa::AlignmentType::kNW, // Needleman-Wunsch(global alignment)
+          5,                        // match (default parameter form SPOA)
+          -4,                       // mismatch
+          -8,                       // gap
+          -6                        // gap extension
+      );
+      // engine->Prealloc(max_length * 1.0, 5);
+      return engine;
+    };
 
-    // auto alignment_engine =
-    //     spoa::AlignmentEngine::Create(spoa::AlignmentType::kNW, 3, -5, -3);
-    // auto graph = spoa::Graph{};
+    auto get_local_alignment_engine = [&](const std::size_t max_length) {
+      auto engine = spoa::AlignmentEngine::Create(
+          spoa::AlignmentType::kSW, // Smith-Waterman(local alignment)
+          5,                        // match (default parameter form SPOA)
+          -4,                       // mismatch
+          -12,                      // gap
+          -8                        // gap extension
+      );
+      // engine->Prealloc(max_length * 1.0, 5);
+      return engine;
+    };
 
-    // for (auto& seq : s) {
-    //   auto alignment = alignment_engine->Align(seq, graph);
-    //   graph.AddAlignment(alignment, seq);
-    // }
-
-    // auto consensus = graph.GenerateConsensus();
-    // spdlog::info("consensus = {}", consensus);
-
-    // auto msa = graph.GenerateMultipleSequenceAlignment();
-    // for (auto& it : msa) {
-    //   spdlog::info("msa seq = {}", it);
-    // }
-
-    auto takes = debug ? 1 : std::numeric_limits<std::size_t>::max();
-    
-    for (auto& raw_read : reads | std::views::take(takes)) {
-      auto windows = make_windows(raw_read);
-      spdlog::info("read name = {}, seq size = {}", raw_read.name,
-                   raw_read.seq.size());
-      spdlog::info("windows.size() = {}", windows.size());
-
-      auto seq_cnt = 0;
-      for (const auto& w : windows | std::views::take(takes)) {
-        seq_cnt += w.overlap_seqs.size();
-        
-        // 1. build de burjin graph
-        // 2. msa then use spoa graph
-        // try to find some pruning policy for doing this.
-        // + prune without realignment
-        // 
-        {
-          auto alignment_engine =
-              spoa::AlignmentEngine::Create(spoa::AlignmentType::kNW, 3, -5,
-                                            -3);
-          auto graph = spoa::Graph{};
-          for (const auto &seq : w.overlap_seqs) {
-            auto alignment = alignment_engine->Align(seq, graph);
-            graph.AddAlignment(alignment, seq);
+    auto init_msa =
+        [&](Window& w,
+            std::shared_ptr<spoa::AlignmentEngine> alignment_engine) {
+          assert(alignment_engine != nullptr);
+          auto order = std::vector<std::size_t>(w.overlap_seqs.size());
+          std::iota(order.begin(), order.end(), 0);
+          std::random_shuffle(order.begin(), order.end());
+          // alignment -> [(node_id_in_graph, id_in_seq), (), ...]
+          // (id == -1) -> insertion or deletion
+          auto alignment = alignment_engine->Align(w.backbone_seq, w.graph);
+          w.graph.AddAlignment(alignment, w.backbone_seq, 1);
+          for (const auto &idx : order) {
+            alignment = alignment_engine->Align(w.overlap_seqs[idx], w.graph);
+            /* default weight = 1 */
+            w.graph.AddAlignment(alignment, w.overlap_seqs[idx], 1);
           }
+          // ? The begin and end may need adjust due to sequencing error
+          // ? happen at the begin and end of the read.
+          // ? possible solution
+          // ? 1. calcuate the coverage for first 10 and last 10 base, select
+        };
 
-        }
+    auto align_on_overlap_seqs =
+        [&](Window& w, std::size_t read_idx,
+            std::shared_ptr<spoa::AlignmentEngine>& alignment_engine) {
+          assert(alignment_engine != nullptr);
 
-        
-        /**
-         * 
-         * 
-         */
+          auto align_and_push_seq = [&](std::size_t idx, const std::string& seq,
+                                        bool strain) {
+            auto alignment = alignment_engine->Align(seq, w.graph);
+            if (alignment.empty()) {
+              return;
+            }
+            auto corrected = w.graph.DecodeAlignment(alignment);
+            if (!strain) {
+              corrected = bio::Codec::rev_comp(corrected);
+            }
+            std::scoped_lock lock(mutexes[idx]);
+            reads[idx].corrected_fragments.emplace_back(std::move(corrected));
+          };
+          for (auto i = 0u; i < w.overlap_seqs.size(); i++) {
+            align_and_push_seq(w.overlap_read_idx[i], w.overlap_seqs[i],
+                               w.overlap_strains[i]);
+          }
+          align_and_push_seq(read_idx, w.backbone_seq, true);
+        };
 
-        /* do msa here */
-        // auto alignment_engine =
-        //     spoa::AlignmentEngine::Create(spoa::AlignmentType::kNW, 3, -5,
-        //     -3);
-        // auto graph = spoa::Graph{};
-        // auto alignment = alignment_engine->Align(w.overlap_seqs[0], graph);
-        // for (auto& seq : w.overlap_seqs | std::views::drop(1)) {
-        //   auto s = std::string(seq);
-        //   auto alignment = alignment_engine->Align(s, graph);
-        //   graph.AddAlignment(alignment, s);
-          
-        // }
-        
-        // auto consensus = graph.GenerateConsensus();
-        // spdlog::debug("get consensus");
-        // spdlog::debug("idxL = {}, idxR = {}", w.idxL, w.idxR);
-        // spdlog::debug("size = {}", consensus.size());
-        // spdlog::debug("consensus = {}", consensus);
-        // auto msa = graph.GenerateMultipleSequenceAlignment();
-        // for (auto& it : msa) {
-        //   spdlog::info("{:4} msa seq = {}", it.size(), it.substr(0, 100));
-        // }
+    auto batch_job = [&](Read& read) {
+      thread_local std::shared_ptr<spoa::AlignmentEngine> local_alignment_engine =
+          get_local_alignment_engine(Window::window_len);
+      thread_local std::shared_ptr<spoa::AlignmentEngine> global_alignment_engine =
+          get_global_alignment_engine(Window::window_len);
+      
+      auto build_window = [&](Window& w) {
+        init_msa(w, global_alignment_engine);
+        w.graph = w.graph.PruneGraph(w.get_prune_len());
+        align_on_overlap_seqs(w, read.idx, local_alignment_engine);
+      };
+      for (auto& w : read.windows) {
+        build_window(w);
       }
-      spdlog::debug("read name = {}, avg seq count = {}", raw_read.name, (double) seq_cnt / windows.size());
+      {
+        static std::atomic_int cnt = 0;
+        spdlog::info("cnt = {}, read {} done, size = {}", ++cnt, read.idx,
+                     read.windows.size());
+      }
+    };
+
+    // auto batch_job = [&](Read& read, std::size_t start,
+    //                      std::size_t end) {
+    //   auto build_window = [&](Window& w) {
+    //     init_msa(w);
+    //     w.graph = w.graph.PruneGraph(w.get_prune_len());
+    //     align_on_overlap_seqs(w, read.idx);
+    //   };
+    //   for (auto i = start; i < end; i++) {
+    //     build_window(read.windows[i]);
+    //   }
+    //   if (end == read.windows.size()) {
+    //     static std::atomic_int cnt = 0;
+    //     spdlog::info("cnt = {}, read {} done, size = {}", ++cnt, read.idx,
+    //                 read.windows.size());
+    //   }
+    // };
+
+    // auto batch_job = [&](std::size_t start, std::size_t end) {
+    //   // TODO: init alignment engine here
+
+
+    //   auto local_alignment_engine =
+    //       get_local_alignment_engine(0);
+    //   auto global_alignment_engine =
+    //       get_global_alignment_engine(0);
+    //   spdlog::debug("global: {}", fmt::ptr(global_alignment_engine.get()));
+    //   spdlog::debug("local: {}", fmt::ptr(local_alignment_engine.get()));
+
+    //   for (auto i = start; i < end; i++) {
+    //     auto& read = reads[i];
+    //     if (read.windows.empty()) {
+    //       continue;
+    //     }
+    //     for (auto& w : read.windows) {
+    //       // auto st = std::chrono::steady_clock::now();
+    //       init_msa(w, global_alignment_engine);
+
+    //       // auto subgraph = w.graph.PruneGraph(w.get_prune_len());
+    //       // w.graph.Clear();
+    //       // w.graph = std::move(subgraph);
+    //       align_on_overlap_seqs(w, read.idx, local_alignment_engine);
+    //       // auto ed = std::chrono::steady_clock::now();
+    //       // if (read.idx == 0) {
+    //       //   spdlog::debug("read {} window {} done, time = {}ms", read.idx,
+    //       //                 w.idxL, std::chrono::duration_cast<std::chrono::milliseconds>(ed - st).count());
+    //       //                 fs::path path = fmt::format(
+    //       //       "/mnt/ec/ness/yolkee/thesis/tests/tmp/prune/{}", read.name);
+    //       //   w.graph.PrintDot(path / fmt::format("{}-{}.dot", w.idxL, w.idxR));
+    //       // }
+    //     }
+    //     static std::atomic_int cnt = 0;
+    //     spdlog::info("cnt = {}, read {} done, size = {}", ++cnt, read.idx,
+    //                  read.windows.size());
+    //   }
+    // };
+
+#pragma omp parallel for num_threads(threads)
+    for (auto& read : reads) {
+      read.windows = make_windows(read);
+    }
+    std::vector<std::future<void>> futures;
+    for (auto& read : reads) {
+      auto [_, res] = threadpool.submit(batch_job, std::ref(read));
+      futures.emplace_back(std::move(res));
+    }
+
+    // for (auto prev_idx = 0, idx = 0, sum = 0; idx < (int) reads.size(); idx++) {
+    //   sum += reads[idx].windows.size();
+    //   if (idx + 1 == reads.size() ||
+    //       sum + reads[idx].windows.size() > WINDOW_IN_BATCH) {
+    //     // spdlog::debug("submit batch job ({}, {})", prev_idx, idx + 1);
+    //     auto [_, res] = threadpool.submit(batch_job, prev_idx, idx + 1);
+    //     futures.emplace_back(std::move(res));
+    //     sum = 0;
+    //     prev_idx = idx + 1;
+    //   }
+    // }
+
+    for (auto& f : futures) {
+      f.get();
+    }
+
+
+    // std::vector<std::vector<std::future<void>>> futures(reads.size());
+    // for (auto i : std::views::iota(0u, reads.size())) {
+    //   auto& read = reads[i];
+    //   // ! fix this
+    //   read.windows = make_windows(read);
+    //   auto& windows = read.windows;
+    //   if (windows.empty()) {
+    //     continue;
+    //   }
+    //   for (auto i = 0u; i * WINDOW_IN_BATCH < windows.size(); i++) {
+    //     spdlog::debug("Read {} submit batch job {}", read.idx, i);
+    //     auto [_, res] = threadpool.submit(
+    //         batch_job, std::ref(read), i * WINDOW_IN_BATCH,
+    //         std::min((i + 1) * WINDOW_IN_BATCH, windows.size()));
+    //     futures[read.idx].emplace_back(std::move(res));
+    //   }
+    // }
+
+    // for (int i = 0; i < reads.size(); i++) {
+    //   auto& read = reads[i];
+    //   for (auto& f : futures[i]) {
+    //     f.get();
+    //   }
+    // }
+
+    std::size_t fragment_size_sum = 0;
+    #pragma omp parallel for reduction(+:fragment_size_sum)
+    for (auto& read : reads) {
+      std::size_t len_sum = 0;
+      for (auto& fragment : read.corrected_fragments) {
+        len_sum += fragment.size();
+      }
+      fragment_size_sum += read.corrected_fragments.size();
+      spdlog::info("read {} corrected_fragments size = {}, average len = {}, "
+                   "total len = {}, origin read len = {}",
+                   read.idx, read.corrected_fragments.size(),
+                   len_sum / read.corrected_fragments.size(), len_sum,
+                   read.seq.size());
+    }
+    spdlog::info("average corrected_fragments size = {}",
+                 fragment_size_sum / reads.size());
+
+    auto path = fs::path("/mnt/ec/ness/yolkee/thesis/data/Ecoli/K12/seqs");
+    fs::create_directories(path);
+    for (auto& read : reads | std::views::take(10)) {
+      auto p = path / (read.name + ".txt");
+      spdlog::info("write to {}", p.string());
+      std::ofstream fout(p);
+      assert(fout.is_open() && "cannot open file");
+      for (auto& fragment : read.corrected_fragments) {
+        fout << fragment << '\n';
+      }
     }
 
     // for (auto& raw_read : raw_reads | std::views::take(1)) {
@@ -530,13 +794,27 @@ public:
     //   // }
     // }
 
-    spdlog::info("no overlap read: {}", cnt);
-    spdlog::info("min overlap size: {}", mn);
-    spdlog::info("max overlap size: {}", mx);
-
     auto corrected_read = std::vector<bio::FastaRecord<false>>{};
     return corrected_read;
   }
+
+  FragmentedReadCorrector(
+      std::vector<bio::FastaRecord<false>>&& raw_reads,
+      std::vector<bio::PafRecord>&& overlaps, const std::string& platform,
+      const int thread_num = std::thread::hardware_concurrency(),
+      bool debug = false)
+      : BaseReadCorrector(std::move(raw_reads), std::move(overlaps), platform,
+                          thread_num, debug),
+        mutexes(raw_read_size) {
+    make_reads();
+    assemblers.reserve(raw_read_size);
+    for (auto i : std::views::iota(0ul, raw_read_size)) {
+      assemblers.emplace_back(ReadAssembler{ std::log2( reads[i].seq.size() )});
+    }
+  }
+
 private:
+  std::vector<ReadAssembler> assemblers;
   std::vector<Read> reads;
+  std::vector<std::mutex> mutexes;
 };

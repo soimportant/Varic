@@ -4,7 +4,6 @@
 #include <vector>
 
 #include <boost/program_options.hpp>
-
 #include "utility/all.hpp"
 
 namespace bio = biovoltron;
