@@ -3,7 +3,7 @@
 #include <vector>
 #include <utility>
 #include <biovoltron/file_io/all.hpp>
-#include "maf.hpp"
+#include "utility/format/maf.hpp"
 
 class Haplotype {
 public:

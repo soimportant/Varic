@@ -40,8 +40,22 @@ namespace detail {
     }
   };
 
+  class Random {
+  private:
+    using IdType = std::size_t;
+
+    auto get_next_id(const std::size_t max_id) -> IdType {
+      thread_local auto rng = std::mt19937_64(std::random_device{}());
+      return rng() % max_id;
+    }
+  public:
+    auto operator()(const std::vector<Worker>& workers) {
+      return get_next_id(workers.size());
+    }
+  };
+
   /**
-   * ! QueueSize policy failed the test, it will made a worker in waiting status
+   * ! QueueSize policy failed the test, it will make a worker in waiting status
    * ! even the queue is empty
    */
   // class QueueSize {
@@ -116,8 +130,8 @@ public:
    * @param id the worker id
    * @param func the callable object
    * @param args the arguments of `func`
-   * @return a std::pair contains the worker id and std::future of the task
-   * @note If you want to pass the argument as a reference, use std::ref to
+   * @return a `std::pair` contains the worker id and std::future of the task
+   * @note If you want to pass the argument as a reference, use `std::ref` to
    * wrap your argument.
    */
   template<class F, class... ArgType>

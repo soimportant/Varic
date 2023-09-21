@@ -66,19 +66,19 @@ auto check_file_format(const std::string& opt_name, const fs::path& p,
                        const int& accept_format) {
   auto format = parse_file_format(p);
   if (format & FILE_FORMAT::ERROR || !(format & accept_format)) {
-    std::string msg;
+    std::string error_msg;
     boost::mp11::mp_for_each<
         boost::describe::describe_enumerators<FILE_FORMAT>>([&](auto f) {
       if (accept_format & f.value) {
-        if (!msg.empty()) {
-          msg += ", ";
+        if (!error_msg.empty()) {
+          error_msg += ", ";
         }
-        msg += "."s + f.name;
+        error_msg += "."s + f.name;
       }
     });
-    std::ranges::for_each(msg, [](auto& c) { c = std::tolower(c); });
+    std::ranges::for_each(error_msg, [](auto& c) { c = std::tolower(c); });
     spdlog::error("invalid file format: \"{}\", accepted format: \"{}\"",
-                  p.extension().string(), msg);
+                  p.extension().string(), error_msg);
     throw bpo::validation_error(bpo::validation_error::invalid_option_value,
                                 opt_name);
   }
@@ -94,29 +94,6 @@ auto make_path_checker(const std::string& opt_name) {
   };
 };
 
-// /**
-//  * @brief
-//  *
-//  * @param opt_name
-//  * @param n haplotype_number
-//  * @return auto
-//  */
-// auto make_multi_path_checker(const std::string& opt_name, std::size_t n) {
-//   return [opt_name, n](const std::vector<fs::path>& paths) {
-//     if (paths.size() != n) {
-//       throw bpo::validation_error(
-//         bpo::validation_error::invalid_option_value, opt_name, paths
-//       );
-//     }
-//     for (const auto& p : paths) {
-//       if (!fs::exists(p)) {
-//         throw bpo::validation_error(
-//           bpo::validation_error::invalid_option_value, opt_name, p
-//         );
-//       }
-//     }
-//   };
-// }
 
 /* --- print some error message --- */
 template <class T>
@@ -144,7 +121,7 @@ auto read_seqs(const fs::path& path) {
       }
     });
   };
-  spdlog::info("Record type {}, start reading from \"{}\" ...",
+  spdlog::debug("Record type {}, start reading from \"{}\" ...",
                boost::typeindex::type_id_with_cvr<T>().pretty_name(),
                path.string());
   for (T t; fin >> t;) {
@@ -163,7 +140,7 @@ auto read_seqs(const fs::path& path) {
 template <class R> auto read_records(const fs::path& path) {
   auto fin = std::ifstream(path);
   auto records = std::vector<R>{};
-  spdlog::info("Read {} from \"{}\" ...",
+  spdlog::debug("Read {} from \"{}\" ...",
                boost::typeindex::type_id_with_cvr<R>().pretty_name(),
                path.string());
   for (R r; fin >> r;) {
