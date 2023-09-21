@@ -6,21 +6,25 @@ source "/mnt/ec/ness/yolkee/miniconda3/bin/activate" bio
 
 exe="/mnt/ec/ness/yolkee/thesis/scripts/evaluation/run_eval.py"
  # ./run_eval.py -d ~/thesis/data/Ecoli/K12 -c ~/thesis/result/Ecoli/K12/ONT/D50/racon.fasta -p ONT --depth 50 -t 8
-data_root="/mnt/ec/ness/yolkee/thesis/data/Ecoli/K12"
-correct_read="/mnt/ec/ness/yolkee/thesis/result/Ecoli/K12/ONT/D50/canu/corrected.fasta"
 platform="ONT"
-depth=50
+depth=20
+tool="vechat"
 threads=40
+
+data_root="/mnt/ec/ness/yolkee/thesis/data/Ecoli/K12"
+result_root="/mnt/ec/ness/yolkee/thesis/result/Ecoli/K12/$platform/D$depth/$tool"  
+correct_read="$result_root/corrected.fasta"
 
 python3 $exe -d           $data_root \
              -c           $correct_read \
              -p           $platform \
              --depth      $depth \
+             -o           $result_root \
              -t           $threads
 
 
 # root="/mnt/ec/ness/yolkee/thesis/data/Ecoli/K13"
-# exe="/mnt/ec/ness/yolkee/thesis/build/eval"
+# exe="/mnt/ec/ness/yolkee/thesis/fbuild/eval"
 # origin_read="$root/reads/ONT/merged_reads_D20.fastq"
 # correct_read="/mnt/ec/ness/yolkee/thesis/result/Ecoli/K13/canu.fasta"
 # plodiy=2

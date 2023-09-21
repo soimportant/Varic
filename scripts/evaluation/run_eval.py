@@ -1,4 +1,4 @@
-
+#! python3
 
 # TODO: run small eval on single directory, not all platform and all depth
 
@@ -56,7 +56,7 @@ def run_cmd(cmd : list, exe_dir = None):
   os.chdir(cwd)  
 
 
-def run_variant_eval(data_dir, corrected_read, threads, depth, platform):
+def run_variant_eval(data_dir, corrected_read, threads, depth, platform, output):
 
   snp_ref_dir = data_dir + "/snp_ref"
   reads_dir = f"{data_dir}/reads/{platform}/D{depth}"
@@ -69,7 +69,7 @@ def run_variant_eval(data_dir, corrected_read, threads, depth, platform):
   eval_args = [eval_exe, "-n", f"{plodiy}"]
 
   # raw reads
-  eval_args += ["-o", raw_reads]
+  eval_args += ["-a", raw_reads]
 
   # corrected reads -> list
   eval_args += ["-c"] + corrected_read
@@ -99,6 +99,9 @@ def run_variant_eval(data_dir, corrected_read, threads, depth, platform):
 
   # platform
   eval_args += ["-p", platform]
+
+  # output_path
+  eval_args += ["-o", f"{output}"]
   run_cmd(eval_args)
 
 
@@ -151,6 +154,10 @@ def parse_result():
   pass
 
 
+def draw_fig():
+  pass
+
+
 
 def main():
   logging.basicConfig(level=logging.DEBUG, format="[%(asctime)s %(levelname)s] %(message)s")
@@ -179,6 +186,10 @@ def main():
                       dest="threads", type=int,
                       default=1,
                       help="Number of threads to use")
+  parser.add_argument("-o", "--output",
+                      dest="output", type=str,
+                      default="result",
+                      help="Output directory to use")
   parser.add_argument("--tmp",
                       dest="tmp", type=str,
                       default="/tmp",
@@ -191,11 +202,12 @@ def main():
   threads = args.threads
   depth = args.depth
   platform = args.platform
+  output = args.output
 
   snp_ref_dir = data_dir + "/snp_ref"
   reads_dir = f"{data_dir}/reads/{platform}/D{depth}"
-  # run_variant_eval(data_dir, corrected_read, threads, depth, platform)
-  run_assemble_eval(corrected_read, threads, platform)
+  run_variant_eval(data_dir, corrected_read, threads, depth, platform, output)
+  # run_assemble_eval(corrected_read, threads, platform)
   # run_quast_eval(data_dir, corrected_read, threads, depth, platform)
 
 if __name__ == "__main__":
