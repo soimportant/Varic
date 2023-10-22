@@ -4,7 +4,8 @@ core.*
 *.out
 build
 data
-include
+include/biovoltron
+include/spoa
 kevin
 tools
 result
