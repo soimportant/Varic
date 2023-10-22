@@ -9,8 +9,8 @@
 #include <map>
 #include <ranges>
 
-#include <spdlog/spdlog.h>
 #include <biovoltron/file_io/vcf.hpp>
+#include <spdlog/spdlog.h>
 
 namespace fs = std::filesystem;
 namespace bio = biovoltron;

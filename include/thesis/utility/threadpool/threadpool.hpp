@@ -6,6 +6,7 @@
 #include <concepts>
 #include <exception>
 #include <algorithm>
+#include <random>
 #include "worker.hpp"
 
 namespace biovoltron {
@@ -87,18 +88,24 @@ public:
   ThreadPool(ThreadPool&&) = delete;
   ThreadPool& operator =(ThreadPool&&) = delete;
 
-  ThreadPool(const std::size_t& size) : pool_size(size), workers(size) {}
+  ThreadPool(const std::size_t& size) : pool_size(size), workers(size) {
+    for (std::size_t i = 0; i < size; i++) {
+      thread_id_to_worker_id[workers[i].get_id()] = i;
+    }
+  }
 
 protected:
   /**
    * @brief the number of threads in threadpool
    */
   std::size_t pool_size;
+
   /**
    * @brief the workers -> the threads
    */
   std::vector<Worker> workers;
 
+  std::map<std::thread::id, std::size_t> thread_id_to_worker_id;
 public:
   /**
    * @brief submit a callable object and its arguments to a specific worker 
@@ -141,6 +148,10 @@ public:
     const std::size_t worker_id = p(workers);
     return submit(worker_id, std::forward<F>(func),
                              std::forward<ArgType>(args)...);
+  }
+
+  const auto get_worker_id() const {
+    return thread_id_to_worker_id.at(std::this_thread::get_id());
   }
 
   /**

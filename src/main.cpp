@@ -7,11 +7,34 @@
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spoa/spoa.hpp>
 
-#include "algo/correction.hpp"
-#include "utility/all.hpp"
+#include "thesis/corrector/fragmented_corrector.hpp"
+#include "thesis/format/paf.hpp"
+#include "thesis/utility/file_io/parse.hpp"
+#include "thesis/utility/file_io/read_record.hpp"
 
 namespace bpo = boost::program_options;
 namespace fs = std::filesystem;
+
+/* --- print some error message --- */
+template <class T>
+concept printable = requires(std::ostream& os, const T& obj) {
+  { os << obj } -> std::same_as<std::ostream&>;
+};
+
+template <printable T = std::string>
+void exit_and_print_help(T msg = ""s) {
+  std::cerr << msg << std::endl;
+  exit(EXIT_FAILURE);
+}
+
+auto make_path_checker(const std::string& opt_name) {
+  return [opt_name](const fs::path& p) {
+    if (!fs::exists(p)) {
+      throw bpo::validation_error(bpo::validation_error::invalid_option_value,
+                                  opt_name, p);
+    }
+  };
+};
 
 auto check_argument(const bpo::variables_map& vmap) {
   auto reads_path = vmap["raw_read"].as<fs::path>();
@@ -82,7 +105,6 @@ int main(int argc, char* argv[]) {
   auto overlap_path = vmap["overlap_info"].as<fs::path>();
   auto output_path = vmap["output_path"].as<fs::path>();
   auto platform = vmap["platform"].as<std::string>();
-  auto raw_reads = std::vector<bio::FastaRecord<false>>{};
 
   auto debug_mode = vmap["debug"].as<bool>();
   if (debug_mode) {
@@ -92,24 +114,27 @@ int main(int argc, char* argv[]) {
   } else {
     spdlog::set_level(spdlog::level::info);
   }
-
-  if (parse_file_format(reads_path) == FILE_FORMAT::FASTA) {
-    raw_reads = read_records<bio::FastaRecord<false>>(reads_path);
-  } else {
-    for (auto& r : read_records<bio::FastqRecord<false>>(reads_path)) {
-      auto record = bio::FastaRecord<false>{.name = std::move(r.name),
-                                            .seq = std::move(r.seq)};
-      raw_reads.emplace_back(std::move(record));
-    }
-  }
-  auto overlap = read_records<bio::PafRecord>(overlap_path);
   auto thread = vmap["thread"].as<int>();
   omp_set_num_threads(thread);
 
+  auto overlap = read_records<bio::PafRecord>(overlap_path);
   auto start = std::chrono::steady_clock::now();
-  auto correcter = FragmentedReadCorrector(
-      std::move(raw_reads), std::move(overlap), platform, thread, debug_mode);
-  auto corrected_read = correcter.correct();
+  
+  auto call_corrector = [&]<class R>() {
+    auto raw_reads = read_records<R>(reads_path);
+    auto correcter = FragmentedReadCorrector<R>(std::move(raw_reads),
+                                                std::move(overlap), platform,
+                                                thread, debug_mode);
+    auto corrected_read = correcter.correct();
+    return corrected_read;
+  };
+
+  auto corrected_read = std::vector<bio::FastaRecord<false>>{};
+  if (parse_file_format(reads_path) == FILE_FORMAT::FASTA) {
+    // auto corrected_read = call_corrector.operator()<bio::FastaRecord<false>>();
+  } else {
+    corrected_read = call_corrector.operator()<bio::FastqRecord<false>>();
+  }  
   auto end = std::chrono::steady_clock::now();
 
   spdlog::info(

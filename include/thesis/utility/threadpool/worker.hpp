@@ -162,6 +162,10 @@ public:
     return task_queue.size();
   }
 
+  auto get_id() const noexcept {
+    return worker->get_id();
+  }
+
   /**
    * @brief made a request to the worker for stop working
    * @return `true` if this invocation made a stop request or it doesn't running,

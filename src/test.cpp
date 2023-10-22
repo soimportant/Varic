@@ -1,18 +1,80 @@
 #include <bits/stdc++.h>
+#include <execution>
 
 #include <biovoltron/algo/align/inexact_match/smithwaterman_sse.hpp>
 #include <biovoltron/utility/istring.hpp>
 #include <biovoltron/file_io/all.hpp>
+#include <boost/program_options.hpp>
 
+#include <edlib.h>
 #include <spoa/spoa.hpp>
 #include <spdlog/spdlog.h>
 
 #include "utility/all.hpp"
+#include "graph/read_graph.hpp"
 
+namespace bpo = boost::program_options;
 namespace bio = biovoltron;
 namespace fs = std::filesystem;
 
+template<class T>
+auto write_records(const fs::path& path, const std::vector<T> records) {
+  auto fout = std::ofstream(path);
+  if (!fout.is_open()) {
+    spdlog::error("Cannot open file {}", path.string());
+    exit(-1);
+  }
+  for (auto& it : records) {
+    fout << it << '\n';
+  }
+}
+
 int main(int argc, char* argv[]) {
+  spdlog::set_level(spdlog::level::debug);
+  
+  fs::path tmp_dir = "/mnt/ec/ness/yolkee/thesis/tests/tmp";
+
+  fs::path my_overlap = tmp_dir / "filtered_overlap.paf";
+  fs::path vechat_overlap = tmp_dir / "overlap1.paf";
+
+  auto my_overlap_records = read_records<bio::PafRecord>(my_overlap);
+  auto vechat_overlap_records = read_records<bio::PafRecord>(vechat_overlap);
+
+  spdlog::info("my_overlap_records size = {}", my_overlap_records.size());
+  spdlog::info("vechat_overlap_records size = {}", vechat_overlap_records.size());
+  sort(my_overlap_records.begin(), my_overlap_records.end());
+  sort(vechat_overlap_records.begin(), vechat_overlap_records.end());
+
+  fs::path a = tmp_dir / "a.paf";
+  fs::path b = tmp_dir / "b.paf";
+
+  write_records(a, my_overlap_records);
+  write_records(b, vechat_overlap_records);
+  
+
+  // assert(argc == 3);
+  // const int kmer = std::atoi(argv[1]);
+  // const int min_occ = std::atoi(argv[2]);
+
+  // fs::path dir = "/mnt/ec/ness/yolkee/thesis/data/Ecoli/K12/seqs";
+  // for (auto d : fs::directory_iterator{dir}) {
+  //   auto fin = std::ifstream(d.path());
+  //   std::vector<std::string> seqs;
+  //   auto len_sum = 0;
+  //   for (std::string s; std::getline(fin, s);) {
+  //     if (!s.empty()) {
+  //       len_sum += s.size();
+  //       seqs.emplace_back(std::move(s));
+  //     }
+  //   }    
+  //   spdlog::info("Read {}, seqs size = {}, len_sum = {}", d.path().string(), seqs.size(), len_sum);
+  //   ReadGraph g(kmer, min_occ);
+  //   g.build(seqs);
+  //   g.print();
+  // }
+
+  
+
 
   /**
    * argv[1] = sam file
@@ -20,68 +82,34 @@ int main(int argc, char* argv[]) {
    * argv[3] = vcf(indel)
    */
 
-  auto sam_file = "/mnt/ec/ness/yolkee/thesis/src/h2.sam";
-  auto sam_header = bio::SamHeader{};
-  auto sam_records = std::vector<bio::SamRecord<false>>{};
-  {
-    auto fin = std::ifstream(sam_file);
-    fin >> sam_header;
-    while (fin) {
-      auto record = bio::SamRecord<false>{};
-      fin >> record;
-      sam_records.push_back(record);
-    }
-  }
-
-  auto vcf_file = "/mnt/ec/mammoth/yolkee/thesis/data/Ecoli/K13/snp_ref/h2.refseq2simseq.SNP.vcf";
-  auto vcf_header = bio::VcfHeader{};
-  auto vcf_records = std::vector<bio::VcfRecord>{};
-  {
-    auto fin = std::ifstream(vcf_file);
-    fin >> vcf_header;
-    while (fin) {
-      auto record = bio::VcfRecord{};
-      fin >> record;
-      vcf_records.push_back(record);
-    }
-  }
-
-  
-  
-
-
-
-
-
-
-
-
-
-  // std::mt19937 rng(std::chrono::steady_clock::now().time_since_epoch().count());
-  // int n = 10;
-  // int len = 20;
-  // std::vector<std::string> s(n);
-  // for (int i = 0; i < n; i++) {
-  //   std::string k;
-  //   for (int k = 0; k < len; k++) {
-  //     s[i].push_back("ACGT"[rng() % 4]);
+  // auto sam_file = "/mnt/ec/ness/yolkee/thesis/src/h2.sam";
+  // auto sam_header = bio::SamHeader{};
+  // auto sam_records = std::vector<bio::SamRecord<false>>{};
+  // {
+  //   auto fin = std::ifstream(sam_file);
+  //   fin >> sam_header;
+  //   while (fin) {
+  //     auto record = bio::SamRecord<false>{};
+  //     fin >> record;
+  //     sam_records.push_back(record);
   //   }
   // }
 
-  // /* try using spoa */
-  
-  // auto alignment_engine = spoa::AlignmentEngine::Create(spoa::AlignmentType::kNW, 3, -5, -3);
-  // auto graph = spoa::Graph{};
-
-  // for (auto& seq : s) {
-  //   auto alignment = alignment_engine->Align(seq, graph);
-  //   graph.AddAlignment(alignment, seq);
+  // auto vcf_file = "/mnt/ec/mammoth/yolkee/thesis/data/Ecoli/K13/snp_ref/h2.refseq2simseq.SNP.vcf";
+  // auto vcf_header = bio::VcfHeader{};
+  // auto vcf_records = std::vector<bio::VcfRecord>{};
+  // {
+  //   auto fin = std::ifstream(vcf_file);
+  //   fin >> vcf_header;
+  //   while (fin) {
+  //     auto record = bio::VcfRecord{};
+  //     fin >> record;
+  //     vcf_records.push_back(record);
+  //   }
   // }
 
-  // auto consensus = graph.GenerateConsensus();
-  // spdlog::info("consensus = {}", consensus);
+ 
 
-  // auto msa = graph.GenerateMultipleSequenceAlignment();
   // for (auto& it : msa) {
   //   spdlog::info("msa seq = {}", it);
   // }

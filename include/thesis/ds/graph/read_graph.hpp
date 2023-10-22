@@ -1,14 +1,18 @@
 #pragma once
 
-#include <map>
 #include <set>
+#include <map>
+#include <string_view>
 #include <string>
+#include <vector>
+#include <ranges>
 
 #include <biovoltron/algo/assemble/graph/graph_wrapper.hpp>
-#include <spdlog/spdlog.h>
+
+namespace bio = biovoltron;
 
 struct ReadGraph {
-private:
+ private:
   struct VertexProperty {
     std::string kmer;
     std::size_t idxL;
@@ -45,7 +49,6 @@ private:
   }
 
   auto create_vertex(const std::string kmer) {
-
     // auto [iter, success] = unique_kmers.insert_or_assign(kmer, Vertex{});
 
     if (unique_kmers.contains(kmer)) {
@@ -93,7 +96,7 @@ private:
     return seq;
   }
 
-public:
+ public:
   ReadGraph(const std::size_t kmer_size, const std::size_t minimum_occurance)
       : kmer_size(kmer_size), minimum_occurance(minimum_occurance) {
     g.set_edge_filter([this](const Edge& e) {
@@ -121,7 +124,8 @@ public:
    * @note provide API for adding only one sequence for reducing memory
    * consumption
    */
-  void add_seq(const std::string& sequence, std::size_t idxL, std::size_t idxR) {
+  void add_seq(const std::string& sequence, std::size_t idxL,
+               std::size_t idxR) {
     // auto sequence = std::string_view(sequence);
     auto v = get_vertex(sequence.substr(0, kmer_size));
     for (auto i = 1u; i + kmer_size <= sequence.size(); i++) {
@@ -163,6 +167,5 @@ public:
     // for (auto &sink : sinks) {
     //   spdlog::info("sink: {}", g[sink].kmer);
     // }
-
   }
 };

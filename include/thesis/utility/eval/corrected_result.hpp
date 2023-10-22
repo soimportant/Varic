@@ -14,8 +14,8 @@
 #include <biovoltron/file_io/all.hpp>
 #include <spdlog/spdlog.h>
 
-#include "utility/format/maf.hpp"
-#include "utility/format/vcf.hpp"
+#include "thesis/utility/format/maf.hpp"
+#include "thesis/utility/format/vcf.hpp"
 
 namespace fs = std::filesystem;
 namespace bio = biovoltron;
@@ -230,8 +230,6 @@ struct CorrectedResult {
                             0.0) /
             consecutive_lens.size();
       }
-
-
     }
     // auto s = std::string{};
     // for (auto i = correct_st; i <= correct_ed; i++) {

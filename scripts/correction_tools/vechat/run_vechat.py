@@ -5,6 +5,7 @@ import sys
 import os
 import argparse
 import shutil
+from Bio import SeqIO
 
 TOOL="vechat"
 
@@ -29,16 +30,18 @@ def main():
     dir = os.path.dirname(output)
     os.makedirs(dir, exist_ok=True)
 
-  # if platform == "PacBio":
-  #   platform = "-pacbio"
-  # elif platform == "ONT":
-  #   platform = "-nanopore"
-  # elif platform == "HiFi":
-  #   platform = "-pacbio-hifi"
+  if platform == "PacBio":
+    platform = "pb"
+  elif platform == "ONT":
+    platform = "ont"
+  elif platform == "HiFi":
+    platform = "pb"
+
 
   exe="/mnt/ec/ness/yolkee/thesis/tools/correction_tools/vechat/scripts/vechat"
   opts=[
     "-t", str(threads),
+    "--platform", platform,
     "-o", output,
     read
   ]
@@ -50,6 +53,12 @@ def main():
   if proc.returncode != 0:
     print(f"Error: {TOOL} failed with exit code {proc.returncode}")
     exit(-1)
+
+  # read result and remove suffix "rr" in read name 
+  records = [r for r in SeqIO.parse(output, "fasta")]
+  for r in records:
+    r.id = r.id[:-2]
+  SeqIO.write(records, output, "fasta")
 
 if __name__ == "__main__":
   main()

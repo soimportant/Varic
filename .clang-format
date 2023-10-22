@@ -1,0 +1,8 @@
+BasedOnStyle: Google
+
+---
+Language: Cpp
+SpaceAfterCStyleCast: true
+PointerAlignment: Left
+LambdaBodyIndentation: OuterScope
+BreakTemplateDeclarationsStyle: Yes

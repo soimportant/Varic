@@ -1,12 +1,14 @@
 #pragma once
 
+#include <cassert>
+#include <iomanip>
+#include <vector>
+
+#include <spdlog/spdlog.h>
+
 #include <biovoltron/file_io/core/header.hpp>
 #include <biovoltron/file_io/core/record.hpp>
 #include <biovoltron/file_io/core/tuple.hpp>
-#include <cassert>
-#include <iomanip>
-#include <spdlog/spdlog.h>
-#include <vector>
 
 namespace fs = std::filesystem;
 namespace bio = biovoltron;

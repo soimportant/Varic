@@ -6,6 +6,8 @@ import os
 import argparse
 import shutil
 
+wanted_tools = ["vechat"]
+
 def get_genome_size(ref):
   with open(ref, "r") as f:
     for line in f:
@@ -57,7 +59,12 @@ def main():
   for tool in os.listdir(cwd):
     if not os.path.isdir(cwd + "/" + tool) or tool == "tmp":
       continue
+
+    if len(wanted_tools) > 0 and tool not in wanted_tools:
+      continue
+
     cmd = [
+      "python3",
       f"{cwd}/{tool}/run_{tool}.py",
       "-r", read,
       "--ref", ref,

@@ -8,7 +8,6 @@ project(thesis LANGUAGES CXX)
 
 # include_directories(${CMAKE_CURRENT_LIST_DIR}/lib)
 include_directories(${CMAKE_CURRENT_LIST_DIR}/include)
-include_directories(${CMAKE_CURRENT_LIST_DIR}/src)
 
 # biovoltron
 set(BIOVOLTRON_TESTS OFF)
@@ -29,6 +28,7 @@ include_directories(${CMAKE_CURRENT_LIST_DIR}/submodules/edlib/edlib/include)
 
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -g -Wall -Wextra -march=native")
+  # use flag below for debugging about memory issue
   # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -g -Wall -Wextra -lcurl -fsanitize=undefined -fsanitize=address")
   add_compile_definitions(DEBUG)
 else()
@@ -40,9 +40,9 @@ add_compile_definitions(DATA_PATH="/mnt/ec/mammoth/yolkee/thesis/data"
 RESULT_PATH="/mnt/ec/mammoth/yolkee/thesis/result")
 
 add_executable(main ${CMAKE_CURRENT_LIST_DIR}/src/main.cpp)
-add_executable(eval ${CMAKE_CURRENT_LIST_DIR}/src/eval.cpp)
+# add_executable(eval ${CMAKE_CURRENT_LIST_DIR}/src/eval.cpp)
 # add_executable(eval2 ${CMAKE_CURRENT_LIST_DIR}/src/eval2.cpp)
-add_executable(test ${CMAKE_CURRENT_LIST_DIR}/src/test.cpp)
-add_executable(maf2fa ${CMAKE_CURRENT_LIST_DIR}/src/maf2fa.cpp)
+# add_executable(test ${CMAKE_CURRENT_LIST_DIR}/src/test.cpp)
+# add_executable(maf2fa ${CMAKE_CURRENT_LIST_DIR}/src/maf2fa.cpp)
 
 
