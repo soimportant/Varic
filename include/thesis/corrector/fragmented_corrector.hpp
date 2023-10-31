@@ -1,28 +1,38 @@
 #pragma once
 
-#include <edlib.h>
 
 #include <concepts>
+#include <execution>
 #include <future>
 #include <mutex>
 #include <numeric>
 #include <optional>
 #include <queue>
 #include <ranges>
-#include <spoa/spoa.hpp>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
 
+#include <edlib.h>
+#include <spoa/spoa.hpp>
+
 #include "thesis/algo/assemble/read_assembler.hpp"
-#include "thesis/corrector/base_corrector.hpp"
 #include "thesis/corrector/detail/read.hpp"
 #include "thesis/corrector/detail/sequence.hpp"
 #include "thesis/corrector/detail/window.hpp"
+#include "thesis/format/paf.hpp"
 #include "thesis/utility/threadpool/threadpool.hpp"
 
-auto align(const std::string_view q, std::string_view t) {
+/**
+ * @brief align overlap part between query read and target read, and return the
+ * cigar string
+ * 
+ * @param q subsequence on query read
+ * @param t subsequence on target read
+ * @return bio::Cigar
+ */
+auto align(const std::string_view q, const std::string_view t) {
   auto aln = edlibAlign(
       q.data(), q.size(), t.data(), t.size(),
       edlibNewAlignConfig(-1, EDLIB_MODE_NW, EDLIB_TASK_PATH, nullptr, 0));
@@ -51,22 +61,20 @@ auto align(const std::string_view q, std::string_view t) {
  */
 template <std::ranges::range R>
 auto find_breakpoints_from_cigar(const bio::Cigar& cigar, const R window_range,
-                                 const std::size_t q_start,
-                                 const std::size_t q_end,
-                                 const std::size_t t_start) {
+                                 const bio::PafRecord& overlap) {
   auto window_cnt = std::ranges::size(window_range);
+  auto [q_start, q_end] = std::make_pair(overlap.q_start, overlap.q_end);
+  auto [t_start, t_end] = std::make_pair(overlap.t_start, overlap.t_end);
 
-  // for (auto& w : window_range) {
-  //   spdlog::debug("w.start = {}, w.end = {}", std::max(q_start, w.start),
-  //   std::min(q_end, w.end));
-  // }
-
-  /* corresponding interval of target read for each window of query read */
+  /* corresponding interval of target read and query read in each window */
   auto t_breakpoints =
       std::vector<std::pair<std::size_t, std::size_t>>(window_cnt);
+  auto q_breakpoints = 
+      std::vector<std::pair<std::size_t, std::size_t>>{window_cnt};
 
   /* iterator for query read and target read */
-  auto q_iter = q_start, t_iter = t_start;
+  auto [q_iter, t_iter] = std::make_pair(q_start, t_start);
+  auto q_last_match = q_iter;
   auto t_last_match = t_iter;
 
   /* store the window indexes that window is not begin at 'M' region */
@@ -75,30 +83,56 @@ auto find_breakpoints_from_cigar(const bio::Cigar& cigar, const R window_range,
   /* store the window indexes that not reach the end of window */
   auto wait_for_last_match = std::queue<std::size_t>{};
 
-  auto w_idx = 0u;
-  auto update = [&]() {
+  /**
+   * @brief set the start position of target read when meet a match or mismatch
+   * in cigar string for each window.
+   */
+  auto set_start_pos_when_match = [&](std::size_t idx) {
+    t_breakpoints[idx].first = t_iter;
+    q_breakpoints[idx].first = q_iter;
+    wait_for_last_match.push(idx);
+  };
+  
+  /**
+   * @brief when q_iter increase, check whether the window inside 
+   * `wait_for_first_match` and `wait_for_last_match` reach the end or not.
+   * 
+   * for `wait_for_first_match`, if window not begin at 'M' region but reach
+   * the end, set interval as an empty sequence.
+   * 
+   * for `wait_for_last_match`, if window reach the end, record the last match
+   * position of query read and target read.
+   */
+  auto check_whether_reach_end = [&]() {
+    while (!wait_for_first_match.empty()) {
+      auto idx = wait_for_first_match.front();
+      if (q_iter + 1 == std::min(q_end, window_range[idx].end)) {
+        wait_for_first_match.pop();
+        q_breakpoints[idx].first = q_breakpoints[idx].second = q_iter + 1;
+      } else {
+        break;
+      }
+    }
     while (!wait_for_last_match.empty()) {
       auto idx = wait_for_last_match.front();
       /* q_end < window_range[idx].end -> the last window */
       if (q_iter + 1 == std::min(q_end, window_range[idx].end)) {
         wait_for_last_match.pop();
         t_breakpoints[idx].second = t_last_match + 1;
+        q_breakpoints[idx].second = q_last_match + 1;
       } else {
         break;
       }
     }
   };
 
-  for (auto& [len, op] : cigar) {
+  auto w_idx = 0u;
+  for (const auto& [len, op] : cigar) {
     if (op == 'M') {
       while (!wait_for_first_match.empty()) {
         auto idx = wait_for_first_match.front();
         wait_for_first_match.pop();
-        t_breakpoints[idx].first = t_iter;
-        wait_for_last_match.push(idx);
-        // spdlog::debug("[{}{}] push {}, q_iter = {}, t_iter = {}", len, op,
-        // idx, q_iter,
-        //               t_iter);
+        set_start_pos_when_match(idx);
       }
       for (auto i = 0; i < len; i++, q_iter++, t_iter++) {
         /**
@@ -108,16 +142,14 @@ auto find_breakpoints_from_cigar(const bio::Cigar& cigar, const R window_range,
          * which means the length of first window is less than
          * `Window::window_extend_len`
          */
+        q_last_match = q_iter;
+        t_last_match = t_iter;
         while (w_idx < window_cnt &&
                q_iter == std::max(q_start, window_range[w_idx].start)) {
-          wait_for_last_match.push(w_idx);
-          // spdlog::debug("push {}, q_iter = {}, t_iter = {}", w_idx, q_iter,
-          // t_iter);
-          t_breakpoints[w_idx].first = t_iter;
+          set_start_pos_when_match(w_idx);
           w_idx++;
         }
-        t_last_match = t_iter;
-        update();
+        check_whether_reach_end();
       }
     } else if (op == 'I') {
       for (auto i = 0; i < len; i++, q_iter++) {
@@ -126,7 +158,7 @@ auto find_breakpoints_from_cigar(const bio::Cigar& cigar, const R window_range,
           wait_for_first_match.push(w_idx);
           w_idx++;
         }
-        update();
+        check_whether_reach_end();
       }
     } else if (op == 'D') {
       t_iter += len;
@@ -135,31 +167,35 @@ auto find_breakpoints_from_cigar(const bio::Cigar& cigar, const R window_range,
       std::exit(EXIT_FAILURE);
     }
   }
-  if (wait_for_last_match.size() != 0) {
-    spdlog::debug("q_iter = {}, t_iter = {}", q_iter, t_iter);
-    spdlog::debug("wait_for_last_match.size() = {}, front = {}",
-                  wait_for_last_match.size(), wait_for_last_match.front());
-    spdlog::debug(
-        "wait_for_last_match.front().start = {}, "
-        "wait_for_last_match.front().end = {}",
-        window_range[wait_for_last_match.front()].start,
-        window_range[wait_for_last_match.front()].end);
-    for (auto& w : window_range) {
-      spdlog::debug("window_st = {}, window_ed = {}",
-                    std::max(q_start, w.start), std::min(q_end, w.end));
-    }
-    for (auto& [t_st, t_ed] : t_breakpoints) {
-      spdlog::debug("t_st = {}, t_ed = {}", t_st, t_ed);
+
+  /* transform coordinate system to target read if relative is reverse */
+  if (overlap.strand == '-') {
+    for (auto i = 0ul; i < window_cnt; i++) {
+      auto len = t_breakpoints[i].second - t_breakpoints[i].first;
+      auto offset = t_breakpoints[i].first - t_start;
+      t_breakpoints[i] = std::make_pair(t_end - offset - len, t_end - offset); 
     }
   }
-  assert(wait_for_last_match.empty());
-  return t_breakpoints;
+
+  /* transform coordinate system relative to each window */
+  for (auto i = 0; i < window_cnt; i++) {
+    // spdlog::debug("({}, {}) <-> ({}, {})", q_breakpoints[i].first,
+    //               q_breakpoints[i].second, window_range[i].start,
+    //               window_range[i].end);
+    assert(q_breakpoints[i].first >= window_range[i].start &&
+           q_breakpoints[i].first <= window_range[i].end &&
+           "q_breakpoints[i].first out of range");
+    q_breakpoints[i].first -= window_range[i].start;
+    q_breakpoints[i].second -= window_range[i].start;
+  }
+
+  return std::make_pair(std::move(q_breakpoints), std::move(t_breakpoints));
 }
 
 template <class R>
   requires std::derived_from<R, bio::FastaRecord<R::encoded>>
-class FragmentedReadCorrector : public BaseReadCorrector<R> {
- public:
+class FragmentedReadCorrector {
+ private:
   /**
    * for the purpose of using `using BaseReadCorrector<R>::{}` here, please
    * refer to links below
@@ -171,16 +207,6 @@ class FragmentedReadCorrector : public BaseReadCorrector<R> {
    * inherited from base class, otherwise, the compiler will not know which
    * type we are referring to.
    */
-  using BaseReadCorrector<R>::BaseReadCorrector;
-  using BaseReadCorrector<R>::overlaps;
-  using BaseReadCorrector<R>::raw_reads;
-  using BaseReadCorrector<R>::raw_reads_size;
-  using BaseReadCorrector<R>::threads;
-  using BaseReadCorrector<R>::name2id;
-  using BaseReadCorrector<R>::debug;
-  using BaseReadCorrector<R>::raw_reads_rc_seq;
-  using BaseReadCorrector<R>::raw_reads_rev_qual;
-
   using Read = ReadWrapper<R>;
 
   /**
@@ -210,10 +236,10 @@ class FragmentedReadCorrector : public BaseReadCorrector<R> {
     auto windows = std::vector<Window>{};
 
     /* initialize boundaries for each window */
-    for (auto pos = 0ul; pos < raw_read.seq.size(); pos += Window::window_len) {
+    for (auto pos = 0ul; pos < raw_read.seq.size(); pos += param.window_len) {
       auto w_idx = windows.size();
-      auto window = Window{w_idx, pos, pos + Window::window_len};
-      window.extend(raw_read.seq.size());
+      auto window = Window{raw_read.id, w_idx, pos, pos + param.window_len};
+      window.extend(param.window_extend_len, raw_read.seq.size());
       std::tie(window.backbone.seq, window.backbone.qual) =
           raw_read.subview(true, window.start, window.end);
       // ? if the last window is too short, that means the right bound of the
@@ -223,60 +249,76 @@ class FragmentedReadCorrector : public BaseReadCorrector<R> {
     }
 
     auto get_window_range = [&](std::size_t start, std::size_t end) {
-      auto st = std::ranges::lower_bound(windows, start, {}, &Window::start);
-      auto ed = std::ranges::upper_bound(windows, end, {}, &Window::start);
+      auto st = std::ranges::upper_bound(windows, start, {}, &Window::start);
+      if (st != windows.end()) {
+        st = std::prev(st);
+      }
+      auto ed = std::ranges::lower_bound(windows, end, {}, &Window::start);
       return std::ranges::subrange(st, ed);
     };
+
+    auto path = fs::path(fmt::format("/mnt/ec/ness/yolkee/thesis/tests/me/{}.txt", raw_read.name));
+    auto fout = std::ofstream(path);
 
     for (const auto& overlap : get_overlap_range(raw_read.name)) {
       auto t_id = name2id[overlap.t_name];
       auto forward_strain = (overlap.strand == '+');
 
-      auto [q_start, q_end] = std::tie(overlap.q_start, overlap.q_end);
-      auto [t_start, t_end] = std::tie(overlap.t_start, overlap.t_end);
-
-      // TODO: put this to PafRecord
-      auto extend_overlap_range = [&]() {
-        
-        // done this way for avoiding unsigned integer underflow
-        q_start =
-            q_start > overlap_extend_len ? q_start - overlap_extend_len : 0ul;
-        q_end = std::min(overlap.q_len, q_end + overlap_extend_len);
-        t_start =
-            t_start > overlap_extend_len ? t_start - overlap_extend_len : 0ul;
-        t_end = std::min(overlap.t_len, t_end + overlap_extend_len);
-      };
-      extend_overlap_range();
-
+      auto [q_start, q_end] = std::make_pair(overlap.q_start, overlap.q_end);
+      auto [t_start, t_end] = std::make_pair(overlap.t_start, overlap.t_end);
       auto [q_seq_view, q_qual_view] = raw_read.subview(true, q_start, q_end);
       auto [t_seq_view, t_qual_view] =
           reads[t_id].subview(forward_strain, t_start, t_end);
-      auto cigar = align(q_seq_view, t_seq_view);
-
       auto window_range = get_window_range(q_start, q_end);
       auto window_idx = window_range.begin() - windows.begin();
-      auto breakpoints = find_breakpoints_from_cigar(cigar, window_range,
-                                                     q_start, q_end, t_start);
-      assert(std::ranges::size(window_range) == breakpoints.size() &&
-             "size not equal between window_range and breakpoints");
-      const auto sz = std::ranges::size(window_range);
-      for (auto i = 0u; i < sz; i++, window_idx++) {
+
+      auto cigar = align(q_seq_view, t_seq_view);
+      auto [q_breakpoints, t_breakpoints] = find_breakpoints_from_cigar(
+          cigar, window_range, overlap);
+      const auto window_cnt = std::ranges::size(window_range);
+      assert(q_breakpoints.size() == t_breakpoints.size() &&
+             "size not equal between q_breakpoints and t_breakpoints");
+      
+      {
+        fout << id2name[raw_read.id] << ' ' << id2name[t_id] << ' ' << (forward_strain ? '+' : '-') << '\n'; 
+        // fout << q_seq_view << '\n';
+        // fout << t_seq_view << '\n';
+        // fout << cigar << '\n';
+        
+        for (int i = 0; i < window_cnt; i++) {
+          auto [q_start, q_end] = std::make_pair(q_breakpoints[i].first + window_range[i].start, q_breakpoints[i].second + window_range[i].start);
+          auto [t_start, t_end] = t_breakpoints[i];
+          // spdlog::debug("t_start = {}, t_end = {}", t_start, t_end);
+          if (overlap.strand == '-') {
+            auto tmp = t_start;
+            t_start = overlap.t_len - t_end;
+            t_end = overlap.t_len - tmp;
+          } 
+          auto fstr = fmt::format("{}: ({}, {}) <-> ({}, {})", i, q_start, q_end, t_start, t_end);
+          fout << fstr << '\n';
+        }
+        fout << "\n\n\n\n\n";
+      }
+
+      for (auto i = 0u; i < window_cnt; i++, window_idx++) {
         auto& window = windows[window_idx];
-        auto& [t_window_st, t_window_ed] = breakpoints[i];
+        auto& [t_window_st, t_window_ed] = t_breakpoints[i];
         if (t_window_st >= t_end) {
           continue;
         }
         assert(t_window_ed >= t_window_st &&
                "t_window_ed < t_window_st, wrong boundary");
-        auto [t_window_seq, t_window_qual] = reads[t_id].subview(
-            forward_strain, t_window_st, t_window_ed);
-        window.overlap_seqs.emplace_back(
-            Sequence{.read_id = t_id,
-                     .left_bound = t_window_st,
-                     .right_bound = t_window_ed,
-                     .seq = t_window_seq,
-                     .qual = t_window_qual,
-                     .forward_strain = forward_strain});
+        auto [t_window_seq, t_window_qual] =
+            reads[t_id].subview(forward_strain, t_window_st, t_window_ed);
+        // when racon add sequence into window, it will store the pos of first
+        // match, then sort the overlap_seqs according the pos of first match
+        window.add_sequence(Sequence{.read_id = t_id,
+                                     .left_bound = t_window_st,
+                                     .right_bound = t_window_ed,
+                                     .seq = t_window_seq,
+                                     .qual = t_window_qual,
+                                     .forward_strain = forward_strain},
+                            q_breakpoints[i]);
       }
     }
 
@@ -473,53 +515,40 @@ class FragmentedReadCorrector : public BaseReadCorrector<R> {
     return windows;
   }
 
-  /**
-   * @brief initialize read
-   * @return void
-   */
-  auto make_reads() {
-    reads.resize(this->raw_reads_size);
-    for (auto i : std::views::iota(0ul, this->raw_reads_size)) {
-      reads[i].name = std::move(raw_reads[i].name);
-      reads[i].seq = std::move(raw_reads[i].seq);
-      reads[i].rc_seq = std::move(raw_reads_rc_seq[i]);
-      if constexpr (std::same_as<R, bio::FastqRecord<R::encoded>>) {
-        reads[i].qual = std::move(raw_reads[i].qual);
-        reads[i].rc_qual = std::move(raw_reads_rev_qual[i]);
-      }
-      reads[i].id = name2id[reads[i].name];
-      /* initial read */
-    }
-    // TODO: shuffle read
-    // std::random_shuffle(reads.begin(), reads.end());
-  }
 
+ public:
+
+  /**
+   * @brief correct the read
+   * 
+   * @return auto 
+   */
   auto correct() {
     auto threadpool = bio::make_threadpool(threads);
 
-    auto get_global_alignment_engine = [&](const std::size_t max_length) {
-      auto aln_engine = spoa::AlignmentEngine::Create(
-          spoa::AlignmentType::kNW,  // Needleman-Wunsch(global alignment)
-          5,                         // match (default parameter form SPOA)
-          -4,                        // mismatch
-          -8,                        // gap
-          -6                         // gap extension
-      );
-      aln_engine->Prealloc(max_length * 1.5, 5);
-      return aln_engine;
-    };
+    // auto get_global_alignment_engine = [&](const std::size_t max_length) {
+    //   auto aln_engine = spoa::AlignmentEngine::Create(
+    //       spoa::AlignmentType::kNW,  // Needleman-Wunsch(global alignment)
+    //       5,                         // match (default parameter form SPOA)
+    //       -4,                        // mismatch
+    //       -8                        // gap
+    //       // -6                         // gap extension
+    //   );
+    //   aln_engine->Prealloc(max_length * 5, 5);
+    //   return aln_engine;
+    // };
 
-    auto get_local_alignment_engine = [&](const std::size_t max_length) {
-      auto aln_engine = spoa::AlignmentEngine::Create(
-          spoa::AlignmentType::kSW,  // Smith-Waterman(local alignment)
-          5,                         // match (default parameter form SPOA)
-          -4,                        // mismatch
-          -8,                        // gap
-          -6                         // gap extension
-      );
-      aln_engine->Prealloc(max_length * 1.5, 5);
-      return aln_engine;
-    };
+    // auto get_local_alignment_engine = [&](const std::size_t max_length) {
+    //   auto aln_engine = spoa::AlignmentEngine::Create(
+    //       spoa::AlignmentType::kSW,  // Smith-Waterman(local alignment)
+    //       5,                         // match (default parameter form SPOA)
+    //       -4,                        // mismatch
+    //       -8,                        // gap
+    //       -6                         // gap extension
+    //   );
+    //   aln_engine->Prealloc(max_length * 5, 5);
+    //   return aln_engine;
+    // };
 
     // auto init_variation_graph =
     //     [&](Window& w, std::shared_ptr<spoa::AlignmentEngine> aln_engine) {
@@ -576,23 +605,17 @@ class FragmentedReadCorrector : public BaseReadCorrector<R> {
     //   align_and_push_seq(read_idx, w.backbone_seq, true);
     // };
 
-    auto local_aln_engines =
-        std::vector<std::shared_ptr<spoa::AlignmentEngine>>{};
-    auto global_aln_engines =
-        std::vector<std::shared_ptr<spoa::AlignmentEngine>>{};
-    for (auto i = 0ul; i < threads; i++) {
-      local_aln_engines.emplace_back(
-          get_local_alignment_engine(Window::window_len));
-      global_aln_engines.emplace_back(
-          get_global_alignment_engine(Window::window_len));
+    std::vector<std::shared_ptr<spoa::AlignmentEngine>> global_alignment_engines(threads);
+    std::vector<std::shared_ptr<spoa::AlignmentEngine>> local_alignment_engines(threads);
+    for (auto i = 0u; i < threads; i++) {
+      global_alignment_engines[i] = get_global_alignment_engine(param.window_len);
+      local_alignment_engines[i] = get_local_alignment_engine(param.window_len);
     }
-    spdlog::debug("After create alignment engine");
-
     auto batch_job = [&](Read& read) {
-      auto thread_id = threadpool.get_worker_id();
-      auto local_aln_engine = local_aln_engines[thread_id];
-      auto global_aln_engine = global_aln_engines[thread_id];
-
+      auto tid = threadpool.get_worker_id();
+      auto local_aln_engine = local_alignment_engines[tid];
+      auto global_aln_engine = global_alignment_engines[tid];
+      
       // spdlog::debug("run Read {}", read.id);
       auto build_window = [&](Window& w) {
         w.build_variation_graph(global_aln_engine);
@@ -607,84 +630,43 @@ class FragmentedReadCorrector : public BaseReadCorrector<R> {
       }
     };
 
-    // auto batch_job = [&](Read& read, std::size_t start,
-    //                      std::size_t end) {
-    //   auto build_window = [&](Window& w) {
-    //     init_msa(w);
-    //     w.graph = w.graph.PruneGraph(w.get_prune_len());
-    //     align_on_overlap_seqs(w, read.idx);
-    //   };
-    //   for (auto i = start; i < end; i++) {
-    //     build_window(read.windows[i]);
-    //   }
-    //   if (end == read.windows.size()) {
-    //     static std::atomic_int cnt = 0;
-    //     spdlog::info("cnt = {}, read {} done, size = {}", ++cnt, read.idx,
-    //                 read.windows.size());
-    //   }
-    // };
+    // auto batch_job = [&](Window& window) {
+    //   auto tid = threadpool.get_worker_id();
+    //   auto local_aln_engine = local_alignment_engines[tid];
+    //   auto global_aln_engine = global_alignment_engines[tid];
 
-    // auto batch_job = [&](std::size_t start, std::size_t end) {
-    //   // TODO: init alignment engine here
-
-    //   auto local_alignment_engine =
-    //       get_local_alignment_engine(0);
-    //   auto global_alignment_engine =
-    //       get_global_alignment_engine(0);
-    //   spdlog::debug("global: {}", fmt::ptr(global_alignment_engine.get()));
-    //   spdlog::debug("local: {}", fmt::ptr(local_alignment_engine.get()));
-
-    //   for (auto i = start; i < end; i++) {
-    //     auto& read = reads[i];
-    //     if (read.windows.empty()) {
-    //       continue;
-    //     }
-    //     for (auto& w : read.windows) {
-    //       // auto st = std::chrono::steady_clock::now();
-    //       init_msa(w, global_alignment_engine);
-
-    //       // auto subgraph = w.graph.PruneGraph(w.get_prune_len());
-    //       // w.graph.Clear();
-    //       // w.graph = std::move(subgraph);
-    //       align_on_overlap_seqs(w, read.idx, local_alignment_engine);
-    //       // auto ed = std::chrono::steady_clock::now();
-    //       // if (read.idx == 0) {
-    //       //   spdlog::debug("read {} window {} done, time = {}ms", read.idx,
-    //       //                 w.idxL,
-    //       std::chrono::duration_cast<std::chrono::milliseconds>(ed -
-    //       st).count());
-    //       //                 fs::path path = fmt::format(
-    //       //       "/mnt/ec/ness/yolkee/thesis/tests/tmp/prune/{}",
-    //       read.name);
-    //       //   w.graph.PrintDot(path / fmt::format("{}-{}.dot", w.idxL,
-    //       w.idxR));
-    //       // }
-    //     }
-    //     static std::atomic_int cnt = 0;
-    //     spdlog::info("cnt = {}, read {} done, size = {}", ++cnt, read.idx,
-    //                  read.windows.size());
-    //   }
+    //   window.build_variation_graph(global_aln_engine);
     // };
 
     spdlog::info("Making windows for each read...");
     auto total_windows = 0ul;
     auto total_seqs = 0ul;
-    const int take_reads = 1;  // reads.size();
+    auto total_seqs_lens = 0ul;
+    const int take_reads = reads.size();
 #pragma omp parallel for num_threads(threads) \
     reduction(+ : total_windows, total_seqs)
-    // for (int i = 0; i < take_reads; i++) {
-    //   auto& read = reads[i];
-    for (auto& read : reads) {
+    for (int i = 0; i < take_reads; i++) {
+      auto& read = reads[i];
+    // for (auto& read : reads) {
       read.windows = make_windows(read);
       total_windows += read.windows.size();
       for (auto& w : read.windows) {
         total_seqs += w.overlap_seqs.size();
+        for (auto& seq : w.overlap_seqs) {
+          total_seqs_lens += seq.seq.size();
+        }
       }
     }
-    spdlog::debug("building window down");
-    std::exit(0);
+    spdlog::info("building window down");
+    spdlog::debug("average windows in a read = {}", total_windows / take_reads);
+    spdlog::debug("average sequence inside a window = {:.2f}", static_cast<double>(total_seqs) / total_windows);
+    spdlog::debug("average sequence length inside a window = {:.2f}", static_cast<double>(total_seqs_lens) / total_seqs);
+
+
+    // std::exit(0);
 
     std::vector<std::future<void>> futures;
+
     spdlog::info("Start building variation graph for each reads");
     for (auto& read : reads | std::views::take(take_reads)) {
       auto [_, res] = threadpool.submit(batch_job, std::ref(read));
@@ -694,6 +676,12 @@ class FragmentedReadCorrector : public BaseReadCorrector<R> {
     for (auto& f : futures) {
       f.get();
     }
+
+    // for (auto& read : reads | std::views::take(take_reads)) {
+    //   for (auto& w : read.windows) {
+    //     w.print_graph_info();
+    //   }
+    // }
 
     std::exit(0);
 
@@ -887,24 +875,215 @@ class FragmentedReadCorrector : public BaseReadCorrector<R> {
     return corrected_read;
   }
 
+  auto print_info() -> void {
+    if constexpr (std::same_as<R, bio::FastqRecord<R::encoded>>) {
+      spdlog::info("Read type: Fastq");
+    } else {
+      spdlog::info("Read type: Fasta");
+    }
+    spdlog::info("Total raw reads: {}", unfiltered_raw_read_size);
+    spdlog::info("Total overlaps: {}", unfiltered_overlap_size);
+    spdlog::info("Platform: {}", platform);
+    spdlog::info("Filtered raw reads: {}", raw_reads_size);
+    spdlog::info("Filtered overlaps: {}", overlaps_size);
+    spdlog::info("Debug mode is {}", debug ? "on" : "off");
+  }
+
   FragmentedReadCorrector(
       std::vector<R>&& raw_reads, std::vector<bio::PafRecord>&& overlaps,
       const std::string& platform,
       const int thread_num = std::thread::hardware_concurrency(),
       bool debug = false)
-      : BaseReadCorrector<R>(std::move(raw_reads), std::move(overlaps),
-                             platform, thread_num, debug),
-        mutexes(this->raw_reads_size) {
-    // ! why need this pointer
-    make_reads();
-    assemblers.reserve(this->raw_reads_size);
-    for (auto i : std::views::iota(0ul, this->raw_reads_size)) {
+      : platform(platform), threads(thread_num), debug(debug) {
+    unfiltered_raw_read_size = raw_reads.size();
+    unfiltered_overlap_size = overlaps.size();
+
+    read_preprocess(raw_reads);
+    overlap_preprocess(overlaps);
+    print_info();
+
+    mutexes = std::vector<std::mutex>(raw_reads_size);
+    assemblers.reserve(raw_reads_size);
+    for (auto i : std::views::iota(0ul, raw_reads_size)) {
       assemblers.emplace_back(ReadAssembler{std::log2(reads[i].seq.size())});
     }
   }
 
  private:
-  const auto overlap_extend_len = 50ul;
+  /**
+   * @brief
+   *
+   * @param reads
+   * @return auto
+   */
+  auto read_preprocess(std::vector<R>& raw_reads) {
+    spdlog::info("Read preprocessing...");
+
+    /* there's no std::ranges::move_if() */
+    for (auto& r : raw_reads) {
+      if (r.seq.size() >= param.min_read_length) {
+        reads.emplace_back(Read(std::move(r)));
+      }
+    }
+    std::sort(std::execution::par, reads.begin(), reads.end());
+    raw_reads_size = reads.size();
+
+    /* transform read name to id */
+    for (auto& raw_read : reads) {
+      raw_read.id = name2id.size();
+      name2id[raw_read.name] = raw_read.id;
+      id2name[raw_read.id] = raw_read.name;
+    }
+  }
+
+  /**
+   * @brief
+   * @param raw_reads
+   * @param overlaps
+   * @return
+   */
+  auto overlap_preprocess(std::vector<bio::PafRecord>& overlaps) {
+    spdlog::info("Overlap preprocessing...");
+
+    // In original .paf file of overlaps between raw_reads, the match base
+    // devided by alignment length is very low, figure out how it be computed
+    // and why it is so low.
+    // const auto min_overlap_identity = 0.7l;
+
+    auto valid_overlap = [&](const bio::PafRecord& overlap) {
+      auto valid_read = [&](const std::string_view name) {
+        return std::ranges::binary_search(reads, name, {}, &Read::name);
+      };
+      if (!valid_read(overlap.q_name) || !valid_read(overlap.t_name)) {
+        return false;
+      }
+      if (overlap.q_name == overlap.t_name) {
+        return false;
+      }
+      if (overlap.aln_len < param.min_overlap_length) {
+        return false;
+      }
+      {
+        // filter conditions used by racon
+        // 1. the length of alignment block from query read and target read
+        // should not be too different
+        // 2. remove internal match
+        //  - A match is internal match if
+        //      (overhang length > match length * internal threshold)
+        //  - internal threshold = 0.8 for racon by using tools fpa
+        //    -
+        //    https://github.com/natir/fpa/blob/master/src/filter/internalmatch.rs
+
+        auto q_overlap_len = overlap.q_end - overlap.q_start + 1;
+        auto t_overlap_len = overlap.t_end - overlap.t_start + 1;
+        auto possible_match_ratio =
+            std::min(q_overlap_len, t_overlap_len) /
+            (double) std::max(q_overlap_len, t_overlap_len);
+        if (possible_match_ratio < 0.7) {
+          return false;
+        }
+
+        const double internal_threshold = 0.8;
+        auto q_head_len = overlap.q_start;
+        auto q_tail_len = overlap.q_len - overlap.q_end;
+        auto t_head_len = overlap.t_start;
+        auto t_tail_len = overlap.t_len - overlap.t_end;
+        auto overhang_len =
+            overlap.strand == '+'
+                ? std::min(q_head_len,
+                           t_head_len + std::min(q_tail_len, t_tail_len))
+                : std::min(q_head_len,
+                           t_tail_len + std::min(q_tail_len, t_head_len));
+        auto alignment_block_len = std::max(q_overlap_len, t_overlap_len);
+        if (overhang_len >
+            std::min(1000.0, alignment_block_len * internal_threshold)) {
+          return false;
+        }
+      }
+
+      // ? filter by identity
+      // if (overlap.aln_len * min_overlap_identity > overlap.match) {
+      //   return false;
+      // }
+      return true;
+    };
+
+    auto filtered_overlaps = std::vector<bio::PafRecord>{};
+    auto reads_need_create_rc = std::vector<int>(raw_reads_size, false);
+/* there's no std::ranges::move_if(), so sad */
+#pragma omp parallel for
+    for (auto& overlap : overlaps) {
+      if (valid_overlap(overlap)) {
+        /* add reverse complement sequence and reverse quality if needed */
+        if (overlap.strand == '-') {
+          auto tid = name2id[overlap.t_name];
+          reads_need_create_rc[tid] = true;
+        }
+        overlap.extend(param.overlap_extend_len);
+#pragma omp critical
+        filtered_overlaps.emplace_back(std::move(overlap));
+      }
+    }
+
+    #pragma omp parallel for
+    for (auto i : std::views::iota(0ul, raw_reads_size)) {
+      if (reads_need_create_rc[i]) {
+        reads[i].create_rc();
+      }
+    }
+    overlaps_size = filtered_overlaps.size();
+    std::sort(std::execution::par, filtered_overlaps.begin(),
+              filtered_overlaps.end());
+    std::swap(this->overlaps, filtered_overlaps);
+  }
+
+
+  struct Param {
+
+    /* minimum length of read that will be corrected */
+    const std::size_t min_read_length = 500ul;
+    
+    /* minimum overlap length between query read and target read */
+    const std::size_t min_overlap_length = 500ul;
+
+    /* extend length on start and end of overlap */
+    const std::size_t overlap_extend_len = 50ul;
+
+    /* length of a window */
+    const std::size_t window_len = 500ul;
+
+    /**
+     * overlap length of adjanency window. Therefore, typical length of a
+     * window would be (window_len + 2 * window_extend_len)
+     */
+    const std::size_t window_extend_len = 15ul;
+
+  } param;
+
+  /* how much reads in original data */
+  std::size_t unfiltered_raw_read_size;
+  /* how much overlap records in original data */
+  std::size_t unfiltered_overlap_size;
+
+  /* overlap information between `raw_reads` */
+  std::vector<bio::PafRecord> overlaps;
+
+  std::size_t raw_reads_size;
+  std::size_t overlaps_size;
+
+  /* sequencing platform of raw_reads */
+  // TODO: should be enum class
+  std::string platform;
+
+  /* mapping from read name to read id and vice versa */
+  std::map<std::string, std::size_t> name2id;
+  std::map<std::size_t, std::string> id2name;
+
+  /* threads */
+  std::size_t threads;
+
+  /* debug flag */
+  bool debug = false;
 
   std::vector<ReadAssembler> assemblers;
   std::vector<Read> reads;

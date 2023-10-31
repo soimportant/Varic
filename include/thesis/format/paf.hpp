@@ -67,6 +67,9 @@ auto operator<=>(const PafRecord& lhs, const PafRecord& rhs) {
   if (lhs.q_name != rhs.q_name) {
     return lhs.q_name <=> rhs.q_name;
   }
+  /* for debug */
+  return lhs.t_name <=> rhs.t_name;
+
   if (std::pair(lhs.q_start, lhs.q_end) != std::pair(rhs.q_start, rhs.q_end)) {
     return std::pair(lhs.q_start, lhs.q_end) <=>
            std::pair(rhs.q_start, rhs.q_end);
