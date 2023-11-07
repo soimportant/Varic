@@ -9,27 +9,31 @@
 #include "thesis/corrector/detail/sequence.hpp"
 
 // ? maybe semi-global alignment?
-auto get_local_alignment_engine(const std::size_t max_length) {
+auto get_local_alignment_engine(const std::size_t max_length = 0) {
   auto aln_engine = spoa::AlignmentEngine::Create(
       spoa::AlignmentType::kSW,  // Smith-Waterman(local alignment)
-      3,                         // match (default parameter form SPOA)
-      -5,                        // mismatch
-      -4                         // gap
-      // -6                           // gap extension
+      5,                         // match (default parameter form SPOA)
+      -4,                        // mismatch
+      -8                         // gap
+      -6                         // gap extension
   );
   // 5 -4 -8 -6
-  aln_engine->Prealloc(max_length * 5, 5);
+  if (max_length != 0) {
+    aln_engine->Prealloc(max_length, 5);
+  } 
   return aln_engine;
 };
 
-auto get_global_alignment_engine(const std::size_t max_length) {
+auto get_global_alignment_engine(const std::size_t max_length = 0) {
   auto aln_engine = spoa::AlignmentEngine::Create(
       spoa::AlignmentType::kNW,  // Needleman-Wunsch(global alignment)
       5,                         // match (default parameter form SPOA)
       -4,                        // mismatch
       -8                         // gap
   );
-  aln_engine->Prealloc(max_length * 5, 5);
+  if (max_length != 0) {
+    aln_engine->Prealloc(max_length, 5);
+  }
   return aln_engine;
 };
 
@@ -76,7 +80,7 @@ class Window {
     end = std::min(end + extend_len, max_len);
   }
 
-  auto add_sequence(const Sequence& seq,
+  auto add_sequence(const Sequence<>& seq,
                     const std::pair<std::size_t, std::size_t>& match_pos) {
     if (match_pos.first == match_pos.second) {
       return;
@@ -84,6 +88,7 @@ class Window {
     if (seq.len() == 0) {
       return;
     }
+    // TODO: consider about quality filter, low quality -> discard sequence
 
     overlap_seqs.emplace_back(std::move(seq));
     match_pos_at_query.emplace_back(match_pos);
@@ -124,14 +129,15 @@ class Window {
         aln = aln_engine->Align(seq.data(), seq.size(), graph);
       }
       if (qual.has_value()) {
-        graph.AddAlignment(aln, seq.data(), seq.size(), qual.value().data(),
-                           qual.value().size());
+        graph.AddAlignment(aln, seq.data(), seq.size(), qual->data(),
+                           qual->size());
       } else {
         /* if data has no quality, the weight is set to 1 */
         graph.AddAlignment(aln, seq.data(), seq.size(), 1);
       }
     };
 
+    /* the order is used by vechat, but can try it randomly */
     auto order = std::vector<std::size_t>(overlap_seqs.size());
     std::iota(order.begin(), order.end(), 0);
     sort(order.begin(), order.end(), [&](int a, int b) {
@@ -142,31 +148,77 @@ class Window {
       align_and_push(overlap_seqs[x].seq, overlap_seqs[x].qual,
                      match_pos_at_query[x]);
     }
+    // print_graph_info();
+    graph = graph.PruneGraph(len());
+    // graph.Clear();
+    // print_graph_info();
 
-    // auto msa = graph.GenerateMultipleSequenceAlignment();
-    // auto out_path =
-    // fs::path(fmt::format("/mnt/ec/ness/yolkee/thesis/tests/tmp/msa/window_{}.txt",
-    // idx)); std::ofstream out(out_path); out << msa[0].size() << std::endl;
-    // for (auto &s : msa) {
-    //   out << s << std::endl;
-    // }
+    // auto path = fs::path(fmt::format("/mnt/ec/ness/yolkee/thesis/tests/graph/{}.dot",
+                            // idx));
+    // graph.PrintDot(path);
 
     // ? The begin and end may need adjust due to sequencing error
     // ? happen at the begin and end of the read.
     // ? possible solution
     // ? 1. calcuate the coverage for first 10 and last 10 base, select
-
-    graph.Clear();
   }
 
-  void print_graph_info() {
+  auto get_corrected_fragments(std::shared_ptr<spoa::AlignmentEngine> global_aln_engine) {
+    assert(global_aln_engine != nullptr);
+    auto local_aln_engine = get_local_alignment_engine();
+
+    auto get_corrected_sequence = [&](const Sequence<>& seq) {
+      auto aln = spoa::Alignment{};
+      if (seq.len() < this->len() * 0.8) {
+        aln = local_aln_engine->Align(seq.seq.data(), seq.seq.size(), graph);
+      } else {
+        aln = global_aln_engine->Align(seq.seq.data(), seq.seq.size(), graph);
+      }
+      auto corrected_fragment = graph.DecodeAlignment(aln);
+      return Sequence<std::string>{
+        .read_id = seq.read_id,
+        .left_bound = seq.left_bound,
+        .right_bound = seq.right_bound,
+        .seq = std::move(corrected_fragment),
+        .qual = std::string{},  // No quality for corrected sequence
+        .forward_strain = seq.forward_strain,
+      };
+    };
+
+    auto order = std::vector<std::size_t>(overlap_seqs.size());
+    std::iota(order.begin(), order.end(), 0);
+    sort(order.begin(), order.end(), [&](int a, int b) {
+      return match_pos_at_query[a].first < match_pos_at_query[b].first;
+    });
+
+    auto corrected_sequences = std::vector<Sequence<std::string>>{};
+    corrected_sequences.reserve(overlap_seqs.size() + 1);
+    corrected_sequences.emplace_back(get_corrected_sequence(backbone));
+    for (const auto& x : order) {
+      corrected_sequences.emplace_back(get_corrected_sequence(overlap_seqs[x]));
+    }
+    return corrected_sequences;
+  }
+
+  // auto get_corrected_fragment(
+  //     const std::string_view raw_seq) const noexcept {
+  //   auto aln = local_aln_engine->Align(raw_seq.data(), raw_seq.size(), graph);
+  //   auto corrected_fragment = graph.DecodeAlignment(aln);
+  //   return corrected_fragment;
+  // };
+
+  void print_graph_info() const noexcept {
     spdlog::debug("read_id = {}", read_id);
     spdlog::debug("idx = {}", idx);
     spdlog::debug("nodes.size() = {}", graph.nodes().size());
     spdlog::debug("edges.size() = {}", graph.edges().size());
     spdlog::debug("sequences.size() = {}", graph.sequences().size());
     spdlog::debug("rank_to_node.size() = {}", graph.rank_to_node().size());
-    spdlog::debug("num_codes = {}", graph.num_codes());
+    spdlog::debug("num_codes = {}\n\n\n", graph.num_codes());
+  }
+
+  auto get_graph_info() {
+    return std::make_pair(graph.nodes().size(), graph.edges().size());
   }
 
   /* read id that this window belong */
@@ -179,11 +231,22 @@ class Window {
   std::size_t start, end;
 
   /* backbone sequence of this window */
-  Sequence backbone;
+  Sequence<> backbone;
 
-  /* the sequence that overlap with backbone seq */
+  /* the sequences that overlap with backbone seq */
   std::vector<std::pair<std::size_t, std::size_t>> match_pos_at_query;
-  std::vector<Sequence> overlap_seqs;
+  std::vector<Sequence<>> overlap_seqs;
+
+  void clear() {
+    // spdlog::debug("Window {} is destructed", idx);
+    // match_pos_at_query.clear();
+    // overlap_seqs.clear();
+    graph.Clear();
+  }
+
+  ~Window() {
+    clear();
+  }
 
  private:
   /* the variation graph */

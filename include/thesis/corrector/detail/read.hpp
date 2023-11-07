@@ -7,6 +7,8 @@
 #include <optional>
 
 #include "thesis/corrector/detail/window.hpp"
+#include "thesis/corrector/detail/sequence.hpp"
+#include "thesis/algo/assemble/read_assembler.hpp"
 
 namespace bio = biovoltron;
 
@@ -24,7 +26,8 @@ class ReadWrapper : public R {
   ReadWrapper(ReadWrapper&&) = default;
   ReadWrapper& operator=(ReadWrapper&&) = default;
 
-  ReadWrapper(R&& r) : R(std::move(r)) {}
+  ReadWrapper(R&& r) : R(std::move(r)), 
+                       assembler(std::log2(this->seq.size())) {}
 
   auto create_rc() noexcept {
     if (rc_seq.size() != 0) {
@@ -33,7 +36,7 @@ class ReadWrapper : public R {
     try {
       rc_seq = bio::Codec::rev_comp(this->seq);
       if constexpr (std::same_as<R, bio::FastqRecord<R::encoded>>) {
-        rc_qual = std::string(this->qual.rbegin(), this->qual.rend());
+        rev_qual = std::string(this->qual.rbegin(), this->qual.rend());
       }
     } catch (std::bad_alloc& e) {
       spdlog::error(
@@ -43,16 +46,24 @@ class ReadWrapper : public R {
     return true;
   }
 
+  auto len() const noexcept {
+    return this->seq.size();
+  }
+
+  /**
+   * @brief return a 
+   * 
+   * @param forward_strain whether the position is on forward strain
+   * @param start start position(0-based)
+   * @param end end position(0-based)
+   * @return std::pair<std::string_view, std::optional<std::string_view>>
+   */
   auto subview(bool forward_strain, const std::size_t start,
                const std::size_t end) const {
-    
-    auto real_start = forward_strain ? start : this->seq.size() - end;
-
-    auto seq_view = std::string_view{};
-    auto qual_view = std::optional<std::string_view>{};
-    seq_view = forward_strain ? this->seq : rc_seq;
-    if constexpr (std::same_as<R, bio::FastqRecord<R::encoded>>) {
-      qual_view = forward_strain ? this->qual : rc_qual;
+    if (start > end) {
+      spdlog::error("start position {} is larger than end position {}", start,
+                    end);
+      throw std::invalid_argument("start position is larger than end position");
     }
 
     if (start > this->seq.size()) {
@@ -60,37 +71,66 @@ class ReadWrapper : public R {
       throw std::out_of_range("start position is out of range of sequence");
     }
 
-    seq_view = seq_view.substr(real_start, end - start);
+    auto real_start = forward_strain ? start : this->seq.size() - end;
+    auto len = end - start;
+
+    auto seq_view = std::string_view{};
+    auto qual_view = std::optional<std::string_view>{};
+    seq_view = forward_strain ? this->seq : rc_seq;
     if constexpr (std::same_as<R, bio::FastqRecord<R::encoded>>) {
-      qual_view = qual_view->substr(real_start, end - start);
+      qual_view = forward_strain ? this->qual : rev_qual.value();
+    }
+    seq_view = seq_view.substr(real_start, len);
+    if constexpr (std::same_as<R, bio::FastqRecord<R::encoded>>) {
+      qual_view = qual_view->substr(real_start, len);
     }
     return std::make_pair(seq_view, qual_view);
+  }
+
+  auto add_corrected_fragment(const Sequence<std::string>& fragment) {
+    bool is_start_kmer = false, is_end_kmer = false;
+    if (fragment.left_bound == 0) {
+      is_start_kmer = true;
+    } else (fragment.right_bound == this->seq.size()) {
+      is_end_kmer = true;
+    }
+    
+    // 
+    // assembler.add_start_seq(fragment.seq, frag
+    // assembler.add_seq(fragment.seq, fragment.left_bound, fragment.right_bound);
+    
+    corrected_fragmenets.emplace_back(fragment);
   }
 
   auto operator<=>(const ReadWrapper& rhs) const {
     return this->name <=> rhs.name;
   }
 
- public:
+private:
   // TODO: coverage -> segment tree like data structure
   // ? we may add a data structure here for recording the coverage covered
   // ? by corrected_fragments, if the coverage is enough, we can assemble
   // ? the corrected read without building MSA.
 
-  std::size_t id;
-
+  
   /* reverse complement sequence */
   std::string rc_seq;
 
   /* reverse quality sequence */
-  std::optional<std::string> rc_qual;
+  std::optional<std::string> rev_qual;
 
-  /**
-   * corrected sequence fragments from windows of others read, may further
-   * assemble to correct version of this read
-   */
-  std::vector<std::string> corrected_fragments;
+public:
+ std::size_t id;
+ /**
+  * corrected sequence fragments from windows of others read, may further
+  * assemble to correct version of this read
+  */
+ std::vector<Sequence<std::string>> corrected_fragments;
 
-  /* windows of this read */
-  std::vector<Window> windows;
+ /* windows of this read */
+ std::vector<Window> windows;
+
+ /* assembler of this read */
+ ReadAssembler assembler;
+ 
 };

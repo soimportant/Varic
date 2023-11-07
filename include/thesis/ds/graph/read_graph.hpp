@@ -48,7 +48,7 @@ struct ReadGraph {
     }
   }
 
-  auto create_vertex(const std::string kmer) {
+  auto create_vertex(const std::string& kmer) {
     // auto [iter, success] = unique_kmers.insert_or_assign(kmer, Vertex{});
 
     if (unique_kmers.contains(kmer)) {
@@ -60,13 +60,13 @@ struct ReadGraph {
     return v;
   }
 
-  auto create_edge(Vertex u, Vertex v) {
+  auto create_edge(const Vertex& u, const Vertex& v) {
     const auto e = g.create_edge(u, v);
     g[e].count += 1;
     return e;
   }
 
-  auto extend_chain(const Vertex& u, const std::string kmer) {
+  auto extend_chain(const Vertex& u, const std::string& kmer) {
     for (const auto e : g.out_edges(u, false)) {
       const auto v = g.target(e);
       if (g[v].kmer == kmer) {
@@ -74,7 +74,7 @@ struct ReadGraph {
         return v;
       }
     }
-    const auto v = create_vertex(kmer);
+    const auto& v = create_vertex(kmer);
     create_edge(u, v);
     return v;
   }
@@ -126,7 +126,6 @@ struct ReadGraph {
    */
   void add_seq(const std::string& sequence, std::size_t idxL,
                std::size_t idxR) {
-    // auto sequence = std::string_view(sequence);
     auto v = get_vertex(sequence.substr(0, kmer_size));
     for (auto i = 1u; i + kmer_size <= sequence.size(); i++) {
       v = extend_chain(v, sequence.substr(i, kmer_size));
@@ -157,8 +156,8 @@ struct ReadGraph {
     //   }
     // }
 
-    spdlog::info("sources: {}", sources.size());
-    spdlog::info("sinks: {}", sinks.size());
+    spdlog::info("nodes size = {}, total base = {}", nodes_size, nodes_size * kmer_size);
+    spdlog::info("sources: {}, sinks = {}", sources.size(), sinks.size());
     /* select front kmer as sources */
     /* select the last kmer as sinks */
     // for (auto &source : sources) {
@@ -167,5 +166,9 @@ struct ReadGraph {
     // for (auto &sink : sinks) {
     //   spdlog::info("sink: {}", g[sink].kmer);
     // }
+  }
+
+  auto get_graph_size() const noexcept {
+    return std::ranges::ssize(g.vertices());
   }
 };

@@ -2,9 +2,15 @@
 
 #include <optional>
 #include <string_view>
+#include <type_traits>
 
+template<class T>
+concept StringLike = std::is_convertible_v<T, std::string_view>;
+
+template<StringLike T = std::string_view>
 class Sequence {
 public:
+
   auto len() const noexcept -> std::size_t {
     return seq.size();
   }
@@ -17,13 +23,13 @@ public:
   std::size_t left_bound, right_bound;
 
   /* the sequence, which is a subsequence of read */
-  std::string_view seq;
+  T seq;
 
   /**
    * the quality of `seq`, if qual.has_value() == false, then the read is come
    * from fasta file
    */
-  std::optional<std::string_view> qual;
+  std::optional<T> qual;
 
   /* forward strain(true) or reverse strain(false) */
   bool forward_strain;

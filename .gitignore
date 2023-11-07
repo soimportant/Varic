@@ -8,8 +8,8 @@ include/biovoltron
 include/spoa
 kevin
 tools
-result
-tests/tmp
+results
+tests
 
 scripts/correction_tools/tmp
 scripts/evaluation/flo
