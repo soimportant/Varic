@@ -4,3 +4,6 @@
 [submodule "submodules/edlib"]
 	path = submodules/edlib
 	url = https://github.com/Martinsos/edlib
+[submodule "submodules/gperftools"]
+	path = submodules/gperftools
+	url = https://github.com/gperftools/gperftools
