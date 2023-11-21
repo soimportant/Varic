@@ -88,18 +88,7 @@ class ReadWrapper : public R {
   }
 
   auto add_corrected_fragment(const Sequence<std::string>& fragment) {
-    bool is_start_kmer = false, is_end_kmer = false;
-    if (fragment.left_bound == 0) {
-      is_start_kmer = true;
-    } else (fragment.right_bound == this->seq.size()) {
-      is_end_kmer = true;
-    }
-    
-    // 
-    // assembler.add_start_seq(fragment.seq, frag
-    // assembler.add_seq(fragment.seq, fragment.left_bound, fragment.right_bound);
-    
-    corrected_fragmenets.emplace_back(fragment);
+    corrected_fragments.emplace_back(fragment);
   }
 
   auto operator<=>(const ReadWrapper& rhs) const {

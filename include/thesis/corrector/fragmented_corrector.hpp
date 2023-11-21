@@ -598,15 +598,17 @@ class FragmentedReadCorrector {
       window.clear();
       {
         static std::atomic_int cnt = 0;
-        spdlog::debug("cnt = {}, (read, window) = ({}, {})", cnt++,
-                      window.read_id, window.idx);
+        if (cnt % 10000 == 0) {
+          spdlog::debug("cnt = {}", cnt);
+        }
+        cnt++;
       }
     };
 
     auto total_windows = 0ul;
     auto total_seqs = 0ul;
     auto total_seqs_lens = 0ul;
-    const int take_reads = 1000;
+    const int take_reads = reads.size();
 
     spdlog::debug("Taking {} reads now", take_reads);
     spdlog::info("Making windows for each reads...");
@@ -646,6 +648,9 @@ class FragmentedReadCorrector {
     }
 
 
+
+
+
     
     // {
     //   auto nodes_fout = std::ofstream("/mnt/ec/ness/yolkee/thesis/tests/stat/nodes.txt");
@@ -669,15 +674,15 @@ class FragmentedReadCorrector {
     //   }
     // }
 
-    // for (int i = 0; i < 10; i++) {
-    //   spdlog::debug("{}, fragments size = {}", i,
-    //   reads[i].corrected_fragments.size()); auto p =
-    //   fmt::format("/mnt/ec/ness/yolkee/thesis/tests/fragments/{}.txt",
-    //   reads[i].name); std::ofstream fout(p); for (const auto& s :
-    //   reads[i].corrected_fragments) {
-    //     fout << s << '\n';
+    // for (int i = 0; i < reads.size(); i++) {
+    //   spdlog::debug("{}, fragments size = {}", i, reads[i].corrected_fragments.size()); 
+    //   auto p = fmt::format("/mnt/ec/ness/yolkee/thesis/tests/fragments/{}.txt",reads[i].name); 
+    //   std::ofstream fout(p); 
+    //   for (const auto& s :reads[i].corrected_fragments) {
+    //     fout << s.left_bound << '\t' << s.right_bound << '\t' << s.seq << '\n';
     //   }
     // }
+    
 
     std::exit(0);
 
@@ -1039,16 +1044,16 @@ class FragmentedReadCorrector {
     const std::size_t min_overlap_length = 500ul;
 
     /* extend length on start and end of overlap */
-    const std::size_t overlap_extend_len = 0ul;
+    const std::size_t overlap_extend_len = 50ul;
 
     /* length of a window */
-    const std::size_t window_len = 500ul;
+    const std::size_t window_len = 470ul;
 
     /**
      * overlap length of adjanency window. Therefore, typical length of a
      * window would be (window_len + 2 * window_extend_len)
      */
-    const std::size_t window_extend_len = 0ul;
+    const std::size_t window_extend_len = 15ul;
 
   } param;
 
