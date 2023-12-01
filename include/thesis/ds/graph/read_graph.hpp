@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <map>
 #include <numeric>
@@ -16,6 +17,12 @@ namespace bio = biovoltron;
 
 struct ReadGraph {
 public:
+  
+  struct Param {
+    const std::size_t MAX_OCCURANCE_AT_END = 4ul;
+    std::size_t NEARBY_THRESHOLD;
+  } param;
+
   struct VertexProperty {
     std::string kmer;
     std::set<std::size_t> appearances;
@@ -38,18 +45,8 @@ public:
   // ? the usage of dup_kmers
   std::set<std::string> dup_kmers;
 
-  /**
-   * @note all std::map that use std::string_view as key type must refer to
-   *       the graph vertex property kmer, which is the real string
-   */
-
-  /* kmer and its vertex */
+  /* each kmer and its vertex */
   std::map<std::string_view, Vertex, std::less<>> unique_kmers;
-
-  /* read length */
-  std::size_t read_len;
-  std::map<std::string_view, Vertex, std::less<>> possible_sources;
-  std::map<std::string_view, Vertex, std::less<>> possible_sinks;
 
   auto build_dup_kmers(const std::string_view seq) {
     std::set<std::string_view> kmers;
@@ -111,10 +108,8 @@ public:
   }
 
 public:
-  ReadGraph(const std::size_t kmer_size, const std::size_t minimum_occurance,
-            const std::size_t read_size)
-      : kmer_size(kmer_size), minimum_occurance(minimum_occurance),
-        read_len(read_size) {
+  ReadGraph(const std::size_t kmer_size, const std::size_t minimum_occurance)
+      : kmer_size(kmer_size), minimum_occurance(minimum_occurance) {
     g.set_edge_filter([this](const Edge &e) {
       return g[e].count >= this->minimum_occurance;
     });
@@ -163,139 +158,291 @@ public:
     }
   }
 
-  auto get_sources(const std::size_t head_len) {
-    auto sources = std::vector<Vertex>{};
-    auto head_cnt = 0;
+  auto get_sources(const std::size_t head_boundary) {
+    auto possible_sources = std::vector<Vertex>{};
     for (const auto &[kmer, v] : unique_kmers) {
       auto it = g[v].appearances.begin();
-      if (it != g[v].appearances.end() && *it <= head_len - kmer_size) {
-        head_cnt++;
-        if (g.is_source(v)) {
-          sources.push_back(v);
-        }
+      if (it != g[v].appearances.end() && *it <= head_boundary - kmer_size) {
+        possible_sources.push_back(v);
       }
     }
-    spdlog::debug("head_len = {}, cnt = {}", head_len, head_cnt);
+    const auto threshold = std::min(
+      param.MAX_OCCURANCE_AT_END,
+      static_cast<std::size_t>(std::ceil(possible_sources.size() / 100.0))
+    );
+    spdlog::debug("head_len = {}, possible_sources.size() = {}", head_boundary, possible_sources.size());
+    auto sources = std::vector<Vertex>{};
+    for (const auto& source : possible_sources) {
+      auto out_degree = std::ranges::count_if(
+        g.out_edges(source, false), 
+        [&, this](const auto& e) {
+          return g[e].count >= threshold;
+        });
+      auto in_degree = std::ranges::count_if(
+        g.in_edges(source, false), [&, this](const auto& e) {
+          return g[e].count >= threshold;
+        });
+      if (in_degree == 0 && out_degree > 0) {
+        sources.push_back(source);
+      }
+    }
     std::ranges::sort(sources, [this](const auto &a, const auto &b) {
-      return std::tie(*g[a].appearances.begin(), *g[a].appearances.rbegin()) <
-             std::tie(*g[b].appearances.begin(), *g[b].appearances.rbegin());
-      return *g[a].appearances.begin() < *g[b].appearances.begin();
+      const auto a_diff = *g[a].appearances.rbegin() - *g[a].appearances.begin();
+      const auto b_diff = *g[b].appearances.rbegin() - *g[b].appearances.begin();
+      return a_diff < b_diff;
+      // return *g[a].appearances.rbegin() < *g[b].appearances.rbegin();
+      // return std::tie(*g[a].appearances.begin(), *g[a].appearances.rbegin()) <
+      //        std::tie(*g[b].appearances.begin(), *g[b].appearances.rbegin());
+      // return *g[a].appearances.begin() < *g[b].appearances.begin();
     });
     return sources;
   }
 
-  auto get_sinks(const std::size_t tail_len) {
-    auto sinks = std::vector<Vertex>{};
-    auto tail_cnt = 0;
-    for (const auto &[kmer, v] : unique_kmers) {
+  auto get_sinks(const std::size_t tail_boundary) {
+    auto possible_sinks = std::vector<Vertex>{};
+    for (const auto& [kmer, v] : unique_kmers) {
       auto it = g[v].appearances.rbegin();
-      if (it != g[v].appearances.rend() && *it >= read_len - tail_len) {
-        tail_cnt++;
-        if (g.is_sink(v)) {
-          sinks.push_back(v);
-        }
+      if (it != g[v].appearances.rend() && *it >= tail_boundary) {
+        possible_sinks.push_back(v);
       }
     }
-    spdlog::debug("tail_len = {}, cnt = {}", tail_len, tail_cnt);
+    const auto threshold = std::min(
+        param.MAX_OCCURANCE_AT_END,
+        static_cast<std::size_t>(std::ceil(possible_sinks.size() / 100.0)));
+    spdlog::debug("tail_len = {}, possible_sinks.size() = {}", tail_boundary, possible_sinks.size());
+    auto sinks = std::vector<Vertex>{};
+    for (const auto& sink : possible_sinks) {
+      auto out_degree = std::ranges::count_if(
+          g.out_edges(sink, false),
+          [&, this](const auto &e) { return g[e].count >= threshold; });
+      auto in_degree = std::ranges::count_if(
+          g.in_edges(sink, false),
+          [&, this](const auto &e) { return g[e].count >= threshold; });
+      if (out_degree == 0 && in_degree > 0) {
+        sinks.push_back(sink);
+      }
+    }
     std::ranges::sort(sinks, [this](const auto &a, const auto &b) {
-      return std::tie(*g[a].appearances.begin(), *g[a].appearances.rbegin()) >
-             std::tie(*g[b].appearances.begin(), *g[b].appearances.rbegin());
+      const auto a_diff =
+          *g[a].appearances.rbegin() - *g[a].appearances.begin();
+      const auto b_diff =
+          *g[b].appearances.rbegin() - *g[b].appearances.begin();
+      return a_diff < b_diff;
+      // return *g[a].appearances.rbegin() > *g[b].appearances.rbegin();
+      // return std::tie(*g[a].appearances.begin(), *g[a].appearances.rbegin()) >
+      //        std::tie(*g[b].appearances.begin(), *g[b].appearances.rbegin());
     });
     return sinks;
   }
 
-  auto get_read(const Vertex &source, const Vertex &sink) {
+  // auto path_finder(const Vertex& source, const Vertex& sink,
+  //                  Path& path, std::map<Vertex, int>& vis,
+  //                  std::set<Vertex>& fail_vertexes) {
+  
+  //   auto stk = std::stack<Vertex>{};
+  //   auto inside_stk = std::set<Vertex>{};
+  //   stk.push(source);
+  //   inside_stk.insert(source);
+
+  //   while (!stk.empty()) {
+  //     auto v = stk.top();
+  //     stk.pop();
+  //     // inside_stk.erase(v);
+  //     if (v == sink) {
+  //       spdlog::debug("Reach sink {}", g[v].kmer);
+  //       return true;
+  //     }
+
+  //     vis[v] += 1;
+  //     auto out_edges = g.out_edges(v, false);
+  //     std::ranges::sort(out_edges, [this, &vis](const auto &a, const auto &b) {
+  //       const auto a_vis_times = std::max(1, vis[g.target(a)]);
+  //       const auto b_vis_times = std::max(1, vis[g.target(b)]);
+  //       return static_cast<double>(g[a].count) / a_vis_times >
+  //              static_cast<double>(g[b].count) / b_vis_times;
+  //     });
+
+  //     for (const auto& e : out_edges) {
+  //       // if (g[e].count == 1) {
+  //       //   continue;
+  //       // }
+  //       auto u = g.target(e);
+  //       if (vis[u] >= g[e].count) {
+  //         continue;
+  //       }
+        
+  //       // if (inside_stk.contains(u)) {
+  //       //   continue;
+  //       // }
+  //       // inside_stk.insert(u);
+
+  //       stk.push(u);
+  //       break;
+  //     }
+  //   }
+
+  //   return false;
+
+
+
+  //   // spdlog::debug("v = {}, ({} - {}), dep = {}", g[v].kmer, *g[v].appearances.begin(),
+  //   //               *g[v].appearances.rbegin(), path.size());
+  //   // // spdlog::debug("cnt = {}", cnt);
+  //   // path.push_back(v);
+  //   // if (v == sink) {
+  //   //   spdlog::debug("Reach sink {}", g[v].kmer);
+  //   //   cnt = 0;
+  //   //   return true;
+  //   // }
+  //   // vis[v] += 1;
+  //   // auto out_edges = g.out_edges(v, false);
+  //   // std::ranges::sort(out_edges, [this, &vis](const auto &a, const auto &b) {
+  //   //   const auto a_vis_times = std::max(1, vis[g.target(a)]);
+  //   //   const auto b_vis_times = std::max(1, vis[g.target(b)]);
+  //   //   return static_cast<double>(g[a].count) / a_vis_times >
+  //   //          static_cast<double>(g[b].count) / b_vis_times;
+  //   // });
+  //   // for (const auto& e : out_edges) {
+  //   //   auto u = g.target(e);
+  //   //   if (vis[u] >= g[e].count) {
+  //   //     continue;
+  //   //   }
+  //   //   if (fail_vertexes.contains(u)) {
+  //   //     continue;
+  //   //   }
+  //   //   if (path_finder(u, sink, path, vis, fail_vertexes)) {
+  //   //     return true;
+  //   //   }
+  //   // }
+  //   // cnt--;
+
+  //   // fail_vertexes.insert(v);
+  //   // path.pop_back();
+  //   // return false;
+  // }
+
+  auto get_read(const Vertex &source, const Vertex &sink, const std::size_t max_len) {
     spdlog::debug("Try source = {}({} - {}) sink = {}({} - {})", g[source].kmer,
                   *g[source].appearances.begin(),
                   *g[source].appearances.rbegin(), g[sink].kmer,
                   *g[sink].appearances.begin(), *g[sink].appearances.rbegin());
     auto path = Path{};
-    // auto stk = std::stack<Vertex>{};
-    // stk.push(source);
+    auto vis = std::map<Vertex, int>{};
+    auto fail_vertexes = std::set<Vertex>{};
 
-    // while (!stk.empty()) {
-    //   auto v = stk.top();
-    //   stk.pop();
-    //   path.push_back(v);
-    //   if (v == sink) {
-    //     break;
-    //   }
-    //   auto out_edges = g.out_edges(v, false);
-    //   assert(!out_edges.empty());
-
-    //   std::ranges::sort(out_edges, [this](const auto &a, const auto &b) {
-    //     return g[a].count > g[b].count;
-    //   });
-    //   for (auto e : out_edges) {
-    //     auto u = g.target(e);
-    //     stk.push(u);
-    //     break;
-    //   }
-    // }
-
-    auto stk = std::stack<std::pair<Vertex, std::size_t>>{};
-    stk.emplace(source, *g[source].appearances.begin());
+    auto stk = std::stack<Vertex>{};
+    stk.push(source);
 
     while (!stk.empty()) {
-      const auto [v, pos] = stk.top();
+      auto v = stk.top();
       stk.pop();
-
+      // spdlog::debug("v = {}, ({} - {}), dep = {}", g[v].kmer, *g[v].appearances.begin(),
+      //               *g[v].appearances.rbegin(), path.size());
+      // spdlog::debug("cnt = {}", cnt);
       path.push_back(v);
-      if (v == sink) {
+      /* if path.size() >= max_len -> stuck in cycle */
+      if (v == sink || path.size() >= max_len) {
+        // spdlog::debug("Reach sink {}", g[v].kmer);
         break;
       }
+      vis[v] += 1;
       auto out_edges = g.out_edges(v, false);
-      assert(!out_edges.empty());
-      std::ranges::sort(out_edges, [this](const auto &a, const auto &b) {
-        return g[a].count > g[b].count;
+      std::ranges::sort(out_edges, [this, &vis](const auto &a, const auto &b) {
+        const auto a_vis_times = std::max(1, vis[g.target(a)]);
+        const auto b_vis_times = std::max(1, vis[g.target(b)]);
+        return static_cast<double>(g[a].count) / a_vis_times >
+               static_cast<double>(g[b].count) / b_vis_times;
       });
-
-      auto is_nearby = [&](const std::set<std::size_t> &appearances) {
-        auto supposed_pos = pos + 1;
-        auto it = appearances.lower_bound(supposed_pos);
-        if (it == appearances.begin()) {
-          if (*it - supposed_pos > kmer_size) {
-            return static_cast<std::size_t>(-1);
-          }
-          return *it;
-        }
-
-        auto prev_it = std::prev(it);
-        if (it == appearances.end()) {
-          if (supposed_pos - *prev_it > kmer_size) {
-            return static_cast<std::size_t>(-1);
-          }
-          return *prev_it;
-        }
-
-        if (supposed_pos - *prev_it > kmer_size &&
-            *it - supposed_pos > kmer_size) {
-          return static_cast<std::size_t>(-1);
-        }
-
-        if (supposed_pos - *prev_it < *it - supposed_pos) {
-          // return (*prev_it + supposed_pos) / 2;
-          return *prev_it;
-        }
-        // return (*it + supposed_pos) / 2;
-        return *it;
-      };
-
-      for (auto e : out_edges) {
+      for (const auto& e : out_edges) {
         auto u = g.target(e);
-        if (auto next_pos = is_nearby(g[u].appearances); next_pos != -1) {
-          stk.emplace(u, next_pos);
-          break;
-        } else {
-          spdlog::debug("pos = {}, cnt = {}, {}({} - {}) -> {}({} - {})", pos + 1, g[e].count, g[v].kmer,
-                        *g[v].appearances.begin(), *g[v].appearances.rbegin(),
-                        g[g.target(e)].kmer,
-                        *g[g.target(e)].appearances.begin(),
-                        *g[g.target(e)].appearances.rbegin());
+        if (vis[u] >= g[e].count) {
+          continue;
         }
+        stk.push(u);
+        break;
       }
     }
+
     return concat_vertices(path);
+
+
+
+    // auto stk = std::stack<std::pair<Vertex, std::size_t>>{};
+    // stk.emplace(source, *g[source].appearances.begin());
+    // while (!stk.empty()) {
+    //   const auto [v, pos] = stk.top();
+    //   stk.pop();
+
+    //   path.push_back(v);
+    //   if (v == sink) {
+    //     spdlog::debug("Reach sink {}", g[v].kmer);
+    //     break;
+    //   }
+    //   vis[v] += 1;
+    //   auto out_edges = g.out_edges(v, false);
+    //   // TODO: can be imporved by use vector of edges -> query vis only once
+    //   std::ranges::sort(out_edges, [this, &vis](const auto &a, const auto &b) {
+    //     const auto a_vis_times = std::max(1, vis[g.target(a)]);
+    //     const auto b_vis_times = std::max(1, vis[g.target(b)]);
+    //     return g[a].count / a_vis_times > g[b].count / b_vis_times;
+    //   });
+
+    //   // remember the visis times and divide by visit time?
+    //   // take the 
+    //   auto is_nearby = [&](const std::set<std::size_t> &appearances) {
+    //     auto supposed_pos = pos + 1;
+    //     auto it = appearances.lower_bound(supposed_pos);
+    //     if (it == appearances.begin()) {
+    //       if (*it - supposed_pos > param.NEARBY_THRESHOLD) {
+    //         return static_cast<std::size_t>(-1);
+    //       }
+    //       // return *it;
+    //       return (*it + supposed_pos) / 2;
+    //     }
+
+    //     // auto prev_it = std::prev(it);
+    //     // if (it == appearances.end()) {
+    //     //   if (supposed_pos - *prev_it > kmer_size) {
+    //     //     return static_cast<std::size_t>(-1);
+    //     //   }
+    //     //   return *prev_it;
+    //     // }
+
+    //     // if (supposed_pos - *prev_it > kmer_size &&
+    //     //     *it - supposed_pos > kmer_size) {
+    //     //   return static_cast<std::size_t>(-1);
+    //     // }
+
+    //     // if (supposed_pos - *prev_it < *it - supposed_pos) {
+    //     //   return (*prev_it + supposed_pos) / 2;
+    //     //   // return *prev_it;
+    //     // }
+    //     // return (*it + supposed_pos) / 2;
+    //     // // return *it;
+    //   };
+
+
+    //   // TODO: there's another solution: if the apperances of next kmer has 
+    //   for (const auto& e : out_edges) {
+    //     // use pos as nearby is not accurate
+        
+    //     auto u = g.target(e);
+    //     stk.emplace(u, pos + 1);
+
+    //     break;
+    //     // if (auto next_pos = is_nearby(g[u].appearances); next_pos != -1) {
+    //     //   stk.emplace(u, next_pos);
+    //     //   break;
+    //     // } else {
+    //     //   spdlog::debug("pos = {}, path.size() = {}, cnt = {}, {}({} - {}) -> {}({} - {})", pos + 1, path.size(), g[e].count, g[v].kmer,
+    //     //                 *g[v].appearances.begin(), *g[v].appearances.rbegin(),
+    //     //                 g[g.target(e)].kmer,
+    //     //                 *g[g.target(e)].appearances.begin(),
+    //     //                 *g[g.target(e)].appearances.rbegin());
+    //     // }
+    //   }
+    // }
+    // return concat_vertices(path);
   }
 
   void print() {

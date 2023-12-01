@@ -13,6 +13,8 @@ endif()
 
 set(CMAKE_CXX_FLAGS_RELEASE "-Ofast")
 set(CMAKE_CXX_FLAGS_DEBUG "-O2 -g")
+# set(CMAKE_CXX_FLAGS_DEBUG "-O2 -g -fsanitize=address")
+
 
 find_package(Boost COMPONENTS program_options thread graph system filesystem REQUIRED)
 find_package(OpenMP REQUIRED)
@@ -43,7 +45,7 @@ if ("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang")
   # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++")
 endif()
 
-# add_executable(main ${CMAKE_CURRENT_LIST_DIR}/src/main.cpp)
+add_executable(main ${CMAKE_CURRENT_LIST_DIR}/src/main.cpp)
 # add_executable(eval ${CMAKE_CURRENT_LIST_DIR}/src/eval.cpp)
 # add_executable(eval2 ${CMAKE_CURRENT_LIST_DIR}/src/eval2.cpp)
 add_executable(test ${CMAKE_CURRENT_LIST_DIR}/src/test.cpp)

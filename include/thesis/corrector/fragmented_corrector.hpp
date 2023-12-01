@@ -3,6 +3,7 @@
 
 #include <concepts>
 #include <execution>
+#include <filesystem>
 #include <future>
 #include <mutex>
 #include <numeric>
@@ -628,7 +629,8 @@ class FragmentedReadCorrector {
       }
     }
     spdlog::info("building window down");
-    spdlog::debug("average windows in a read = {}", total_windows / take_reads);
+    spdlog::debug("average windows in a read = {:.2f}", 
+                  static_cast<double>(total_windows) / take_reads);
     spdlog::debug("average sequence inside a window = {:.2f}",
                   static_cast<double>(total_seqs) / total_windows);
     spdlog::debug("average sequence length inside a window = {:.2f}",
@@ -674,16 +676,16 @@ class FragmentedReadCorrector {
     //   }
     // }
 
-    // for (int i = 0; i < reads.size(); i++) {
-    //   spdlog::debug("{}, fragments size = {}", i, reads[i].corrected_fragments.size()); 
-    //   auto p = fmt::format("/mnt/ec/ness/yolkee/thesis/tests/fragments/{}.txt",reads[i].name); 
-    //   std::ofstream fout(p); 
-    //   for (const auto& s :reads[i].corrected_fragments) {
-    //     fout << s.left_bound << '\t' << s.right_bound << '\t' << s.seq << '\n';
-    //   }
-    // }
-    
-
+    fs::remove_all("/mnt/ec/ness/yolkee/thesis/tests/fragments");
+    fs::create_directories("/mnt/ec/ness/yolkee/thesis/tests/fragments");
+    for (int i = 0; i < reads.size(); i++) {
+      spdlog::debug("{}, fragments size = {}", i, reads[i].corrected_fragments.size());
+      auto p = fmt::format("/mnt/ec/ness/yolkee/thesis/tests/fragments/{}.txt",reads[i].name); 
+      std::ofstream fout(p); 
+      for (const auto& s :reads[i].corrected_fragments) {
+        fout << s.left_bound << '\t' << s.right_bound << '\t' << s.seq << '\n';
+      }
+    }
     std::exit(0);
 
     // for (auto prev_idx = 0, idx = 0, sum = 0; idx < (int) reads.size();

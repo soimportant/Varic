@@ -1,10 +1,10 @@
 #pragma once
 
-#include <spdlog/spdlog.h>
-
-#include <biovoltron/file_io/fasta.hpp>
 #include <concepts>
 #include <optional>
+
+#include <biovoltron/file_io/fasta.hpp>
+#include <spdlog/spdlog.h>
 
 #include "thesis/corrector/detail/window.hpp"
 #include "thesis/corrector/detail/sequence.hpp"
@@ -26,8 +26,7 @@ class ReadWrapper : public R {
   ReadWrapper(ReadWrapper&&) = default;
   ReadWrapper& operator=(ReadWrapper&&) = default;
 
-  ReadWrapper(R&& r) : R(std::move(r)), 
-                       assembler(std::log2(this->seq.size())) {}
+  ReadWrapper(R&& r) : R(std::move(r)) {};
 
   auto create_rc() noexcept {
     if (rc_seq.size() != 0) {
@@ -109,17 +108,17 @@ private:
   std::optional<std::string> rev_qual;
 
 public:
- std::size_t id;
- /**
-  * corrected sequence fragments from windows of others read, may further
-  * assemble to correct version of this read
-  */
- std::vector<Sequence<std::string>> corrected_fragments;
+  std::size_t id;
+  /**
+    * corrected sequence fragments from windows of others read, may further
+    * assemble to correct version of this read
+    */
+  std::vector<Sequence<std::string>> corrected_fragments;
 
- /* windows of this read */
- std::vector<Window> windows;
+  /* windows of this read */
+  std::vector<Window> windows;
 
- /* assembler of this read */
- ReadAssembler assembler;
+  // /* assembler of this read */
+  // ReadAssembler assembler;
  
 };
