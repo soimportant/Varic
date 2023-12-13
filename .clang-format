@@ -2,10 +2,9 @@ BasedOnStyle: Google
 
 ---
 Language: Cpp
-SpaceAfterCStyleCast: true
 DerivePointerAlignment: false
 PointerAlignment: Left
+SpaceAfterCStyleCast: true
 LambdaBodyIndentation: OuterScope
 BreakTemplateDeclarationsStyle: Yes
-
 IncludeBlocksStyle: Regroup

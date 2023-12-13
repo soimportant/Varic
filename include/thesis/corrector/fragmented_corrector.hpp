@@ -639,6 +639,7 @@ class FragmentedReadCorrector {
     std::vector<std::future<void>> futures;
 
     spdlog::info("Start building variation graph for each reads");
+    // TODO: random_view
     for (auto& read : reads | std::views::take(take_reads)) {
       for (auto&& window : read.windows) {
         auto [_, res] = threadpool.submit(batch_job, std::ref(window));
