@@ -19,11 +19,17 @@ struct ReadGraph {
 public:
   struct Param {
 
-    /* the length that used to refind the source when not reaching sink */
-    const std::size_t SEARCH_LEN_WHEN_NOT_GOAL = 100ul;
+    
 
-    /* The valid weight ratio that should consider as a branch */
+    /* For global assmebling */
+    /* The valid weight ratio that should consider as a valid branch */
     const double VALID_BRANCH_RATIO = 0.2;
+
+    /* For local assembling */
+    /* The weight ratio of a branch point to the other */
+    const double LOCAL_ASSEMBLE_WEIGHT_RATIO = 0.8;
+    /* The length threshold for preventing the cycle case */
+    const double LOCAL_ASSEMBLE_LENGTH_RATIO = 1.2;
   } param;
 
   struct VertexProperty {
@@ -84,6 +90,22 @@ public:
     return create_edge(u, v);
   }
 
+  auto get_out_weight_sum(const Vertex &v) {
+    auto out_edges = g.out_edges(v, false);
+    return std::accumulate(out_edges.begin(), out_edges.end(), 0.0,
+                           [this](const auto &a, const auto &b) {
+                             return a + g[b].count;
+                           });
+  }
+
+  auto get_in_weight_sum(const Vertex &v) {
+    auto in_edges = g.in_edges(v, false);
+    return std::accumulate(in_edges.begin(), in_edges.end(), 0.0,
+                           [this](const auto &a, const auto &b) {
+                             return a + g[b].count;
+                           });
+  }
+
   auto get_vertex_inside_range(const std::size_t start, const std::size_t end) {
     assert(start < end);
     auto vertices = std::vector<Vertex>{};
@@ -120,10 +142,323 @@ public:
     return in_degree > 0 && out_degree == 0;
   }
 
-  
+  template<bool Reverse = false>
+  auto concat_vertices(const Vertex& source, Path& path) {
+    auto read = g[source].kmer;
+    for (const auto& [v, weight] : path) {
+      if constexpr (Reverse == false) {
+        read += g[v].kmer.back();
+      } else {
+        read += g[v].kmer.front();
+      }
+    }
+    if constexpr (Reverse) {
+      std::ranges::reverse(read);
+    }
+    return read;
+  }
+
+  // TODO: extend source and sink
+  template <bool Reverse = false> auto extend_path_at_end(Path &path) {}
+
+  /* do local assemble between source and sink */
+  template <bool Reverse = false>
+  auto local_assemble(const Vertex &source, const Vertex &sink,
+                      const std::size_t length_limit) {
+
+    // spdlog::debug("Local assemble between {} - {}", g[source].kmer,
+    //               g[sink].kmer);
+    // considering following stuffs
+    // 1. cycle
+    // 2. the possibility of jumping to vertexes behind the sink
+    //   - set a threshold of the path length
+    auto paths = std::vector<Path>{};
+    auto dfs = [&](auto &&self, const Vertex &now, Path &path,
+                   std::set<Vertex> &vis) {
+      if (now == sink) {
+        paths.push_back(path);
+        return;
+      }
+      if (path.size() >= length_limit) {
+        return;
+      }
+      vis.insert(now);
+      auto edges = std::vector<Edge>{};
+      if constexpr (Reverse == false) {
+        edges = g.out_edges(now, false);
+      } else {
+        edges = g.in_edges(now, false);
+      }
+      for (const auto &e : edges) {
+        auto u = Vertex{};
+        if constexpr (Reverse == false) {
+          u = g.target(e);
+        } else {
+          u = g.source(e);
+        }
+        if (vis.contains(u)) {
+          continue;
+        }
+        path.emplace_back(u, g[e].count);
+        self(self, u, path, vis);
+        path.pop_back();
+      }
+      vis.erase(now);
+    };
+    /* the path doesn't contain source for preserving weight between source and its previous vertex */
+    auto path = Path{};
+    auto vis = std::set<Vertex>{};
+    dfs(dfs, source, path, vis);
+    // sort the paths by average weight
+    std::ranges::sort(paths, [](const auto &a, const auto &b) {
+      auto a_sum = std::accumulate(
+          a.begin(), a.end(), 0.0,
+          [](const auto &a, const auto &b) { return a + b.second; });
+      auto b_sum = std::accumulate(
+          b.begin(), b.end(), 0.0,
+          [](const auto &a, const auto &b) { return a + b.second; });
+      return a_sum / a.size() > b_sum / b.size();
+    });
+    // spdlog::debug("There are {} paths.", paths.size());
+    for (auto &path : paths) {
+      auto average_weight = std::accumulate(path.begin(), path.end(), 0.0,
+                                            [](const auto &a, const auto &b) {
+                                              return a + b.second;
+                                            }) /
+                            path.size();
+      // spdlog::debug("path.size() = {}, average_weight = {}", path.size(),
+      //               average_weight);
+    }
+    assert(paths.size() > 0);
+    return paths[0];
+  }
+
+  template<bool Reverse = false>
+  auto valid_path(const Path& path) {
+    auto sz = path.size();
+    for (auto i = 1u; i < sz; i++) {
+      auto [prev, prev_weight] = path[i - 1];
+      auto [now, now_weight] = path[i];
+      if constexpr (Reverse == false) {
+        if (g[prev].kmer.substr(1) != g[now].kmer.substr(0, kmer_size - 1)) {
+          return false;
+        }
+      } else {
+        if (g[prev].kmer.substr(0, kmer_size - 1) !=
+            g[now].kmer.substr(1)) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  // check the path for the need of local reassemble
+  template <bool Reverse = false>
+  auto check_and_reassemble_path(const Path &path) {
+    // 1. identity the source and sink that need local assembly
+    //   - if the adjancent vertexes in the path are not supported by each
+    //   other,
+    //   - then it could need local reassmebly
+
+    // for (auto [v, w] : path) {
+    //   spdlog::debug("v = {}, weight = {}", g[v].kmer, w);
+    // }
+
+    auto new_path = Path{};
+    new_path.reserve(path.size());
+    auto find_previous_breakpoint = [&](const std::size_t weight) {
+      for (auto i = (int) new_path.size() - 1; i >= 0; i--) {
+        if (new_path[i].second > weight) {
+          return i;
+        }
+      }
+      return -1;
+    };
+    assert(valid_path<Reverse>(path));
+
+    for (auto i = 0u; i < path.size(); i++) {
+      if (i && path[i].second > 2 * path[i - 1].second) {
+        // spdlog::debug("Found branch point at {}, i = {}", g[path[i].first].kmer, i);
+        auto prev_branch_pos = find_previous_breakpoint(path[i].second * param.LOCAL_ASSEMBLE_WEIGHT_RATIO);
+        if (prev_branch_pos != -1) {
+          auto prev_branch_v = new_path[prev_branch_pos].first;
+          auto old_path_len = new_path.size() - prev_branch_pos;
+          if (old_path_len >= 2 * kmer_size) {
+            // the reassembled process may take a lot of time, skip it
+            new_path.emplace_back(path[i]);
+            continue; 
+          }
+          auto now_branch_v = path[i].first;
+          // spdlog::debug("Found previous branch point at {}, len = {}",
+          //               g[prev_branch_v].kmer, old_path_len);
+          assert(valid_path<Reverse>(new_path));
+          auto reassembled_path = local_assemble<Reverse>(
+              prev_branch_v, now_branch_v, old_path_len * param.LOCAL_ASSEMBLE_LENGTH_RATIO);
+          
+          /* Remove old path, add reassembled path */
+          while (new_path.size() != prev_branch_pos + 1) {
+            // spdlog::debug("pop {}", g[new_path.back().first].kmer);
+            new_path.pop_back();
+          }
+          std::ranges::copy(reassembled_path, std::back_inserter(new_path));
+          // for (auto [v, w] : reassembled_path) {
+          //   spdlog::debug("Re: v = {}, weight = {}", g[v].kmer, w);
+          // }
+          assert(valid_path<Reverse>(new_path));
+        } else {
+          new_path.clear();
+          new_path.emplace_back(path[i]);
+          // extend from source
+        }
+      } else {
+        new_path.emplace_back(path[i]);
+        // spdlog::debug("push {}", g[path[i].first].kmer);
+        // spdlog::debug("new_path:");
+        // for (auto [v, w] : new_path | std::views::reverse | std::views::take(10) | std::views::reverse) {
+        //   spdlog::debug("v = {}, weight = {}", g[v].kmer, w);
+        // }
+        // assert(valid_path<Reverse>(new_path));
+      }
+    }
+    assert(valid_path<Reverse>(new_path));
+    return new_path;
+
+
+    // auto new_path = Path{};
+    // new_path.push_back(path[0]);
+    // for (auto i = 1ul; i < path.size(); i++) {
+    //   // now weight <-> weight of prev -> now
+    //   auto [prev, prev_weight] = path[i - 1];
+    //   auto [now, now_weight] = path[i];
+
+    //   if (now_weight > 2 * prev_weight) {
+    //     spdlog::debug("Found branch point at {}, i = {}", g[prev].kmer, i);
+    //     // found `now` is a branch point, find the previous branch point for
+    //     // local assemble
+    //     bool found = false;
+
+    //     for (int k = i - 1; k >= 0; k--) {
+    //       if (i - k >= 2 * kmer_size || new_path.empty()) {
+    //         for (int j = k + 1; j < i; j++) {
+    //           new_path.push_back(path[j]);
+    //         }
+    //         break;
+    //       }
+    //       if (path[k].second > now_weight * param.LOCAL_ASSEMBLE_WEIGHT_RATIO) {
+    //         spdlog::debug("Found previous branch point at {}, len = {}",
+    //                       g[path[k].first].kmer, i - k);
+    //         found = true;
+    //         auto reassembled_path = local_assemble<Reverse>(
+    //             path[k].first, now,
+    //             (i - k) * param.LOCAL_ASSEMBLE_LENGTH_RATIO);
+    //         std::ranges::copy(reassembled_path, std::back_inserter(new_path));
+    //         break;
+    //       }
+    //       assert(!new_path.empty());
+    //       new_path.pop_back();
+    //     }
+    //     // cannot find previous branch point, extend the source
+    //     if (!found) {
+    //       // take `now` as source, extend the path from `now`
+    //     }
+    //   } else {
+    //     new_path.push_back(path[i]);
+    //   }
+    // }
+    // return new_path;
+  }
+
+  template <bool Reverse = false>
+  auto path_finder(const Vertex &now, const Vertex &goal, Path &path,
+                   std::map<Vertex, std::size_t> &vis,
+                   std::set<Vertex> &fail_vertexes) {
+    if (path.size() >= max_assemble_len) {
+      // stuck in cycle, need increase kmer_size
+      spdlog::debug("Reach max_assemble_len {}", max_assemble_len);
+      return false;
+    }
+    if (now == goal) {
+      spdlog::debug("Reach sink {}, path.size() = {}", g[now].kmer,
+                    path.size());
+      return true;
+    }
+    vis[now] += 1;
+    auto edges = std::vector<Edge>{};
+    if constexpr (Reverse == false) {
+      edges = g.out_edges(now, false);
+    } else {
+      edges = g.in_edges(now, false);
+    }
+    auto edge_weights = std::vector<std::size_t>(edges.size());
+    auto edge_weight_sum = 0.0;
+    for (auto i = 0u; const auto &e : edges) {
+      auto u = Vertex{};
+      if constexpr (Reverse == false) {
+        u = g.target(e);
+      } else {
+        u = g.source(e);
+      }
+      // edge_weights[i] = g[e].count / std::max(1ul, vis[u]);
+      edge_weights[i] = g[e].count / (vis[u] + 1);
+      edge_weight_sum += edge_weights[i];
+      i += 1;
+    }
+    auto order = std::vector<std::size_t>(edges.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::ranges::sort(order, [&](const auto &a, const auto &b) {
+      return edge_weights[a] > edge_weights[b];
+    });
+    for (const auto x : order) {
+      auto [e, w] = std::tie(edges[x], edge_weights[x]);
+      auto u = Vertex{};
+      if constexpr (Reverse == false) {
+        u = g.target(e);
+      } else {
+        u = g.source(e);
+      }
+      if (fail_vertexes.contains(u)) {
+        continue;
+      }
+      if (w == 0 || w < param.VALID_BRANCH_RATIO * edge_weight_sum) {
+        continue;
+      }
+      path.emplace_back(u, w);
+      if (path_finder<Reverse>(u, goal, path, vis, fail_vertexes)) {
+        return true;
+      }
+      path.pop_back();
+    }
+    vis[now] -= 1;
+    fail_vertexes.insert(now);
+    {
+      if (path.size() > max_path_size) {
+        max_path_size = path.size();
+        /* record the path */
+        max_path = path;
+      }
+    }
+    return false;
+  }
+
+  auto reset_vertex_weight_on_path(Path &path) {
+    // set the duplicated kmer weight to the minimum weight it appear
+    auto min_weight = std::map<ReadGraph::Vertex, std::size_t>{};
+    for (const auto &[vertex, weight] : path) {
+      if (min_weight.contains(vertex)) {
+        min_weight[vertex] = std::min(min_weight[vertex], weight);
+      } else {
+        min_weight[vertex] = weight;
+      }
+    }
+    for (auto &[vertex, weight] : path) {
+      weight = min_weight[vertex];
+    }
+  }
 
 public:
-  ReadGraph(const std::size_t kmer_size, const std::size_t min_occ, const std::size_t max_assemble_len) {
+  ReadGraph(const std::size_t kmer_size, const std::size_t min_occ,
+            const std::size_t max_assemble_len) {
     this->kmer_size = kmer_size;
     this->min_occ = min_occ;
     this->max_assemble_len = max_assemble_len;
@@ -164,236 +499,135 @@ public:
     }
   }
 
-  auto get_sources(const std::size_t start, const std::size_t end) {
+  auto get_sources(const std::size_t start, const std::size_t end, const std::size_t weight_threshold) {
     auto candidate_sources = get_vertex_inside_range(start, end);
-    spdlog::debug("Find Sources({} - {}): candidate.size() = {}", start, end,
+    spdlog::debug("Find Sources({} - {}) using weight = {}: candidate.size() = {}", start, end, weight_threshold,
                   candidate_sources.size());
-    for (auto min_weight = this->min_occ; min_weight >= 2; min_weight--) {
-      spdlog::debug("searching for weight_threshold = {}...", min_weight);
-      auto sources = std::vector<Vertex>{};
-      std::ranges::copy_if(candidate_sources, std::back_inserter(sources),
-                           [this, min_weight](const auto &v) {
-                             return is_source(v, min_weight);
-                           });
-      if (sources.size() != 0) {
-        std::ranges::sort(sources, [this](const auto &a, const auto &b) {
-          const auto a_diff =
-              *g[a].appearances.rbegin() - *g[a].appearances.begin();
-          const auto b_diff =
-              *g[b].appearances.rbegin() - *g[b].appearances.begin();
-          return a_diff < b_diff;
-          // return *g[a].appearances.rbegin() < *g[b].appearances.rbegin();
-          // return std::tie(*g[a].appearances.begin(),
-          // *g[a].appearances.rbegin()) <
-          //        std::tie(*g[b].appearances.begin(),
-          //        *g[b].appearances.rbegin());
-          // return *g[a].appearances.begin() < *g[b].appearances.begin();
-        });
-        return sources;
+    auto sources = std::vector<Vertex>{};
+    std::ranges::copy_if(candidate_sources, std::back_inserter(sources),
+                         [this, weight_threshold](const auto &v) {
+                           return is_source(v, weight_threshold);
+                         });
+    std::ranges::sort(sources, [this](const auto &a, const auto &b) {
+      const auto [a_st, a_ed] =
+          std::tie(*g[a].appearances.begin(), *g[a].appearances.rbegin());
+      const auto [b_st, b_ed] =
+          std::tie(*g[b].appearances.begin(), *g[b].appearances.rbegin());
+      const auto a_diff = a_ed - a_st;
+      const auto b_diff = b_ed - b_st;
+      if (a_diff != b_diff) {
+        return a_diff < b_diff;
       }
-    }
-    return std::vector<Vertex>{};
+      if (a_ed != b_ed) {
+        return a_ed < b_ed;
+      }
+      return b_st > a_st;
+    });
+    // std::ranges::sort(sources, [this](const auto &a, const auto &b) {
+    //   const auto a_diff =
+    //       *g[a].appearances.rbegin() - *g[a].appearances.begin();
+    //   const auto b_diff =
+    //       *g[b].appearances.rbegin() - *g[b].appearances.begin();
+    //   return a_diff < b_diff;
+    //   // return *g[a].appearances.rbegin() < *g[b].appearances.rbegin();
+    //   // return std::tie(*g[a].appearances.begin(),
+    //   // *g[a].appearances.rbegin()) <
+    //   //        std::tie(*g[b].appearances.begin(),
+    //   //        *g[b].appearances.rbegin());
+    //   // return *g[a].appearances.begin() < *g[b].appearances.begin();
+    // });
+    return sources;
   }
 
-  auto get_sinks(const std::size_t start, const std::size_t end) {
+  auto get_sinks(const std::size_t start, const std::size_t end, const std::size_t weight_threshold) {
     auto candidate_sinks = get_vertex_inside_range(start, end);
-    spdlog::debug("Find Sinks({} - {}): candidate.size() = {}", start, end,
+    spdlog::debug("Find Sinks({} - {}) using weight = {}: candidate.size() = {}", start, end, weight_threshold,
                   candidate_sinks.size());
 
-    for (auto min_weight = this->min_occ; min_weight >= 2; min_weight--) {
-      spdlog::debug("searching for weight_threshold = {}...", min_weight);
-      auto sinks = std::vector<Vertex>{};
-      std::ranges::copy_if(
-          candidate_sinks, std::back_inserter(sinks),
-          [this, min_weight](const auto &v) { return is_sink(v, min_weight); });
-      if (sinks.size() != 0) {
-        std::ranges::sort(sinks, [this](const auto &a, const auto &b) {
-          const auto a_diff =
-              *g[a].appearances.rbegin() - *g[a].appearances.begin();
-          const auto b_diff =
-              *g[b].appearances.rbegin() - *g[b].appearances.begin();
-          return a_diff < b_diff;
-          // return *g[a].appearances.rbegin() < *g[b].appearances.rbegin();
-          // return std::tie(*g[a].appearances.begin(),
-          // *g[a].appearances.rbegin()) <
-          //        std::tie(*g[b].appearances.begin(),
-          //        *g[b].appearances.rbegin());
-          // return *g[a].appearances.begin() < *g[b].appearances.begin();
-        });
-        return sinks;
+    auto sinks = std::vector<Vertex>{};
+    std::ranges::copy_if(candidate_sinks, std::back_inserter(sinks),
+                         [this, weight_threshold](const auto &v) {
+                           return is_sink(v, weight_threshold);
+                         });
+    std::ranges::sort(sinks, [this](const auto &a, const auto &b) {
+      const auto [a_st, a_ed] =
+          std::tie(*g[a].appearances.begin(), *g[a].appearances.rbegin());
+      const auto [b_st, b_ed] =
+          std::tie(*g[b].appearances.begin(), *g[b].appearances.rbegin());
+      const auto a_diff = a_ed - a_st;
+      const auto b_diff = b_ed - b_st;
+      if (a_diff != b_diff) {
+        return a_diff < b_diff;
       }
-    }
-    return std::vector<Vertex>{};
-  }
-
-  // auto path_finder(const Vertex& source, const Vertex& sink,
-  //                  Path& path, std::map<Vertex, int>& vis,
-  //                  std::set<Vertex>& fail_vertexes) {
-
-  //   auto stk = std::stack<Vertex>{};
-  //   auto inside_stk = std::set<Vertex>{};
-  //   stk.push(source);
-  //   inside_stk.insert(source);
-
-  //   while (!stk.empty()) {
-  //     auto v = stk.top();
-  //     stk.pop();
-  //     // inside_stk.erase(v);
-  //     if (v == sink) {
-  //       spdlog::debug("Reach sink {}", g[v].kmer);
-  //       return true;
-  //     }
-
-  //     vis[v] += 1;
-  //     auto out_edges = g.out_edges(v, false);
-  //     std::ranges::sort(out_edges, [this, &vis](const auto &a, const auto &b)
-  //     {
-  //       const auto a_vis_times = std::max(1, vis[g.target(a)]);
-  //       const auto b_vis_times = std::max(1, vis[g.target(b)]);
-  //       return static_cast<double>(g[a].count) / a_vis_times >
-  //              static_cast<double>(g[b].count) / b_vis_times;
-  //     });
-
-  //     for (const auto& e : out_edges) {
-  //       // if (g[e].count == 1) {
-  //       //   continue;
-  //       // }
-  //       auto u = g.target(e);
-  //       if (vis[u] >= g[e].count) {
-  //         continue;
-  //       }
-
-  //       // if (inside_stk.contains(u)) {
-  //       //   continue;
-  //       // }
-  //       // inside_stk.insert(u);
-
-  //       stk.push(u);
-  //       break;
-  //     }
-  //   }
-
-  //   return false;
-
-  //   // spdlog::debug("v = {}, ({} - {}), dep = {}", g[v].kmer,
-  //   *g[v].appearances.begin(),
-  //   //               *g[v].appearances.rbegin(), path.size());
-  //   // // spdlog::debug("cnt = {}", cnt);
-  //   // path.push_back(v);
-  //   // if (v == sink) {
-  //   //   spdlog::debug("Reach sink {}", g[v].kmer);
-  //   //   cnt = 0;
-  //   //   return true;
-  //   // }
-  //   // vis[v] += 1;
-  //   // auto out_edges = g.out_edges(v, false);
-  //   // std::ranges::sort(out_edges, [this, &vis](const auto &a, const auto
-  //   &b) {
-  //   //   const auto a_vis_times = std::max(1, vis[g.target(a)]);
-  //   //   const auto b_vis_times = std::max(1, vis[g.target(b)]);
-  //   //   return static_cast<double>(g[a].count) / a_vis_times >
-  //   //          static_cast<double>(g[b].count) / b_vis_times;
-  //   // });
-  //   // for (const auto& e : out_edges) {
-  //   //   auto u = g.target(e);
-  //   //   if (vis[u] >= g[e].count) {
-  //   //     continue;
-  //   //   }
-  //   //   if (fail_vertexes.contains(u)) {
-  //   //     continue;
-  //   //   }
-  //   //   if (path_finder(u, sink, path, vis, fail_vertexes)) {
-  //   //     return true;
-  //   //   }
-  //   // }
-  //   // cnt--;
-
-  //   // fail_vertexes.insert(v);
-  //   // path.pop_back();
-  //   // return false;
-  // }
-
-  auto path_finder(const Vertex &now, const Vertex &goal, Path &path,
-                   std::map<Vertex, std::size_t> &vis) {
-    {
-      max_path_size = std::max(max_path_size, path.size());
-    }
-    if (path.size() >= max_assemble_len) {
-      spdlog::debug("Reach max_assemble_len {}", max_assemble_len);
-      return false;
-    }
-    if (now == goal) {
-      spdlog::debug("Reach sink {}", g[now].kmer);
-      return true;
-    }
-    vis[now] += 1;
-    auto out_edges = g.out_edges(now, false);
-    auto edge_weights = std::vector<std::size_t>(out_edges.size());
-    auto edge_weight_sum = 0.0;
-    for (auto i = 0u; const auto &e : out_edges) {
-      auto u = g.target(e);
-      edge_weights[i++] = g[e].count / std::max(1ul, vis[u]);
-      edge_weight_sum += edge_weights[i - 1];
-    }
-    auto order = std::vector<std::size_t>(out_edges.size());
-    std::iota(order.begin(), order.end(), 0);
-    std::ranges::sort(order, [&](const auto &a, const auto &b) {
-      return edge_weights[a] > edge_weights[b];
+      if (a_st != b_st) {
+        return a_st > b_st;
+      }
+      return a_ed < b_ed;
     });
-    for (const auto x : order) {
-      auto [e, w] = std::tie(out_edges[x], edge_weights[x]);
-      auto u = g.target(e);
-      if (fail_vertexes.contains(u)) {
-        continue;
-      }
-      if (w < param.VALID_BRANCH_RATIO * edge_weight_sum) {
-        continue;
-      }
-      path.emplace_back(u, w);
-      if (path_finder(u, goal, path, vis)) {
-        return true;
-      }
-      path.pop_back();
-    }
-    fail_vertexes.insert(now);
-    vis[now] -= 1;
-    return false;
+    //   std::ranges::sort(sinks, [this](const auto &a, const auto &b) {
+    //     const auto a_diff =
+    //         *g[a].appearances.rbegin() - *g[a].appearances.begin();
+    //     const auto b_diff =
+    //         *g[b].appearances.rbegin() - *g[b].appearances.begin();
+    //     return a_diff < b_diff;
+    //     // return *g[a].appearances.rbegin() < *g[b].appearances.rbegin();
+    //     // return std::tie(*g[a].appearances.begin(),
+    //     // *g[a].appearances.rbegin()) <
+    //     //        std::tie(*g[b].appearances.begin(),
+    //     //        *g[b].appearances.rbegin());
+    //     // return *g[a].appearances.begin() < *g[b].appearances.begin();
+    //   });
+    //   return sinks;
+    return sinks;
   }
 
-  auto get_read(const Vertex &source, const Vertex &sink) {
+ 
+
+  
+
+  /**
+   * @brief Get the read object
+   * 
+   * @param source 
+   * @param sink ideal sink
+   * @return auto 
+   */
+  template<bool Reverse = false>
+  auto find_read(const Vertex &source, const Vertex &sink) {
+    assert(source != sink);
+    spdlog::debug("Find the path in {} direction", Reverse ? "reverse" : "forward");
     spdlog::debug("Try source = {}({} - {}) sink = {}({} - {})", g[source].kmer,
                   *g[source].appearances.begin(),
                   *g[source].appearances.rbegin(), g[sink].kmer,
                   *g[sink].appearances.begin(), *g[sink].appearances.rbegin());
-    if (fail_vertexes.contains(source) || fail_vertexes.contains(sink)) {
-      spdlog::debug("source or sink is failed", g[source].kmer);
-      return std::string{};
-    }
-    if (source == sink) {
-      spdlog::debug("source == sink");
-      return std::string{};
-    }
+
+    /* reset the state */
+    max_path_size = 0;
+    max_path.clear();
 
     /* store (Vertex, edge_weight) for further locally reassemble */
-    auto path = std::vector<std::pair<Vertex, std::size_t>>{};
+    auto path = Path{};
     auto vis = std::map<Vertex, std::size_t>{};
-    max_path_size = 0;
-    auto result = path_finder(source, sink, path, vis);
-    {
-      spdlog::debug("result = {}, max_path_size = {}", result, max_path_size);
+    auto fail_vertexes = std::set<Vertex>{};
+    
+    auto result = path_finder<Reverse>(source, sink, path, vis, fail_vertexes);
+    if (result == false) {
+      spdlog::debug("Cannot find a proper path for given source and sink");
+      spdlog::debug("Using path with maximum length({}) as result",
+                    max_path_size);
+      /* if stuck in cycle, need increase kmer_size, return directly */
+      if (max_path_size == max_assemble_len) {
+        spdlog::debug("max_path length reach threshold {}", max_assemble_len);
+        return concat_vertices<Reverse>(source, max_path);
+      }
+      path = max_path;
     }
-    // {
-    //   for (auto [v, weight] : path) {
-    //     spdlog::debug("v = {}, ({} - {}), weight = {}", g[v].kmer,
-    //                   *g[v].appearances.begin(), *g[v].appearances.rbegin(),
-    //                   weight);
-    //   }
-    // }
-    auto corrected_read = g[source].kmer;
-    for (const auto &[v, weight] : path) {
-      corrected_read += g[v].kmer.back();
-    }
-    return corrected_read;
+    
+    spdlog::debug("before path.size() = {}", path.size());
+    reset_vertex_weight_on_path(path);
+    path = check_and_reassemble_path<Reverse>(path);
+    spdlog::debug("after path.size() = {}", path.size());
+    return concat_vertices<Reverse>(source, path);
 
     // auto fail_vertexes = std::set<Vertex>{};
     // auto stk = std::stack<Vertex>{};
@@ -570,13 +804,17 @@ public:
 
   /* The maximum length that `get_read` can reach*/
   std::size_t max_assemble_len;
-  /* record the vertexes when failed on assembly */
-  std::set<Vertex> fail_vertexes;
 
-  /* for debug, recording  */
+  /* for debug, recording info of longest path */
+  Path max_path;
   std::size_t max_path_size;
 
-  std::vector<std::size_t> order;
+
+  /* The vertex to id mapping */
+  std::map<Vertex, std::size_t> vertex_to_id;
+  /* The parent id of largest connected component */
+  std::size_t largest_cc_id = 0;
+  DisjointSetUnion dsu;
 
   // ? the usage of dup_kmers
   std::set<std::string> dup_kmers;
