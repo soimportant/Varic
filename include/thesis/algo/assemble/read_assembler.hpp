@@ -22,10 +22,12 @@ class ReadAssembler {
      * at both ends of the read
      */
 
-    /* The incraseing ratio of searching length related to `read_len` on both end */
+    /* The incraseing ratio of searching length related to `read_len` on both
+     * end */
     const double INCREASE_END_LEN_RATIO = 0.02;
 
-    /* The maximum searching length ratio, stop searching when reaching this value */
+    /* The maximum searching length ratio, stop searching when reaching this
+     * value */
     const double MAX_END_LEN_RATIO = 0.12;
 
     /* Maximum occurances at searching source and sink, *User parameter* */
@@ -49,14 +51,22 @@ class ReadAssembler {
     const double ASSEMBLE_MAX_LEN_RATIO = 1.05;
   } param;
 
-  auto identify_source_from_graph(ReadGraph& graph) {
-    for (auto weight = param.MAX_END_OCC; weight >= param.MIN_END_OCC;
-         --weight) {
+  /**
+   * Identifies the source vertices in the given ReadGraph based on the
+   * specified criteria.
+   *
+   * @param graph The ReadGraph to analyze.
+   * @return A vector of source vertices satisfying the criteria, or an empty
+   * vector if no sink vertices are found.
+   */
+  auto identify_source_from_graph(ReadGraph &graph) {
+    for (auto occ = param.MAX_END_OCC; occ >= param.MIN_END_OCC; --occ) {
       for (auto ratio = 0.0; ratio < param.MAX_END_LEN_RATIO;
            ratio += param.INCREASE_END_LEN_RATIO) {
         auto start = std::floor(read_len * ratio);
-        auto end = std::ceil(read_len * (ratio + param.INCREASE_END_LEN_RATIO));        
-        auto sources = graph.get_sources(start, end, weight);
+        auto end = std::ceil(read_len * (ratio + param.INCREASE_END_LEN_RATIO));
+        /* get sources from (start, end) with occurance = `occ` */
+        auto sources = graph.get_sources(start, end, occ);
         if (sources.size() != 0) {
           return sources;
         }
@@ -65,12 +75,21 @@ class ReadAssembler {
     return std::vector<ReadGraph::Vertex>{};
   }
 
-  auto identify_sink_from_graph(ReadGraph& graph) {
+  /**
+   * Identifies the sink vertices from the given ReadGraph based on the
+   * specified criteria.
+   *
+   * @param graph The ReadGraph to identify the sink vertices from.
+   * @return A vector of sink vertices satisfying the criteria, or an empty
+   * vector if no sink vertices are found.
+   */
+  auto identify_sink_from_graph(ReadGraph &graph) {
     for (auto weight = param.MAX_END_OCC; weight >= param.MIN_END_OCC;
          --weight) {
       for (auto ratio = 0.0; ratio < param.MAX_END_LEN_RATIO;
            ratio += param.INCREASE_END_LEN_RATIO) {
-        auto start = std::ceil(read_len * (1 - (ratio + param.INCREASE_END_LEN_RATIO)));
+        auto start =
+            std::ceil(read_len * (1 - (ratio + param.INCREASE_END_LEN_RATIO)));
         auto end = std::floor(read_len * (1 - ratio));
         auto sinks = graph.get_sinks(start, end, weight);
         if (sinks.size() != 0) {
@@ -81,6 +100,13 @@ class ReadAssembler {
     return std::vector<ReadGraph::Vertex>{};
   }
 
+  /**
+   * Determines the state of a read based on its length.
+   *
+   * @param read The input read to be evaluated.
+   * @return The state of the read (ASSEMBLE_TOO_LONG, ASSEMBLE_SUCCESS,
+   * ASSEMBLE_TOO_SHORT, or ASSEMBLE_FAILED).
+   */
   auto get_read_state(std::string_view read) {
     if (read.size() >= read_len * param.ASSEMBLE_MAX_LEN_RATIO) {
       return State::ASSEMBLE_TOO_LONG;
@@ -93,6 +119,7 @@ class ReadAssembler {
     }
     return State::ASSEMBLE_FAILED;
   }
+
 
   /**
    * @brief Assembles a read from a sequence of kmers.
@@ -111,9 +138,8 @@ class ReadAssembler {
    * @return A string representing the assembled read, or an empty string if no
    * read could be assembled.
    */
-  auto assemble_read(const std::size_t kmer_size, const std::size_t min_occ) {
-    auto graph =
-        ReadGraph(kmer_size, min_occ, read_len * param.ASSEMBLE_MAX_LEN_RATIO);
+  auto assemble_read(const std::size_t kmer_size) {
+    auto graph = ReadGraph(kmer_size, read_len * param.ASSEMBLE_MAX_LEN_RATIO);
     for (const auto &seq : seqs) {
       graph.add_seq(seq.seq, seq.left_bound);
     }
@@ -121,23 +147,23 @@ class ReadAssembler {
     auto sinks = identify_sink_from_graph(graph);
 
     if (sources.size() == 0 || sinks.size() == 0) {
-      spdlog::warn("Cannot find source or sink");
+      // spdlog::warn("Cannot find source or sink");
       return std::string{};
     }
-    {
-      spdlog::debug("Sources size = {}", sources.size());
-      for (auto source : sources) {
-        spdlog::debug("source = {}({} - {})", graph.g[source].kmer,
-                      *graph.g[source].appearances.begin(),
-                      *graph.g[source].appearances.rbegin());
-      }
-      spdlog::debug("Sinks size = {}", sinks.size());
-      for (auto sink : sinks) {
-        spdlog::debug("sink = {}({} - {})", graph.g[sink].kmer,
-                      *graph.g[sink].appearances.begin(),
-                      *graph.g[sink].appearances.rbegin());
-      }
-    }
+    // {
+    //   spdlog::debug("Sources size = {}", sources.size());
+    //   for (auto source : sources) {
+    //     spdlog::debug("source = {}({} - {})", graph.g[source].kmer,
+    //                   *graph.g[source].appearances.begin(),
+    //                   *graph.g[source].appearances.rbegin());
+    //   }
+    //   spdlog::debug("Sinks size = {}", sinks.size());
+    //   for (auto sink : sinks) {
+    //     spdlog::debug("sink = {}({} - {})", graph.g[sink].kmer,
+    //                   *graph.g[sink].appearances.begin(),
+    //                   *graph.g[sink].appearances.rbegin());
+    //   }
+    // }
 
     auto longest_read = std::string{};
     for (auto source : sources | std::views::take(2)) {
@@ -177,15 +203,43 @@ class ReadAssembler {
 public:
   ReadAssembler(const std::size_t read_len) { this->read_len = read_len; }
 
+  // delete copy constructor and copy assignment
+  ReadAssembler(const ReadAssembler &) = delete;
+
+  ReadAssembler &operator=(const ReadAssembler &) = delete;
+  
+  /* move constructor */
+  ReadAssembler(ReadAssembler &&rhs) {
+    read_len = rhs.read_len;
+    seqs = std::move(rhs.seqs);
+  }
+
+  /* move assignment */
+  ReadAssembler &operator=(ReadAssembler &&rhs) {
+    read_len = rhs.read_len;
+    seqs = std::move(rhs.seqs);
+    return *this;
+  }
+
+  auto add_seq(Sequence<std::string> seq) { seqs.emplace_back(std::move(seq)); }
+
   auto add_seq(const std::string_view sequence, const std::size_t left_bound,
                const std::size_t right_bound) {
+    // seqs.emplace_back(Sequence<std::string>{
+    //     .read_id = -1,
+    //     .left_bound = left_bound,
+    //     .right_bound = right_bound,
+    //     .seq = std::string(sequence),
+    //     .qual = std::nullopt,
+    //     .forward_strain = true,
+    // });
     seqs.emplace_back(Sequence<std::string>{
-        .read_id = -1,
-        .left_bound = left_bound,
-        .right_bound = right_bound,
-        .seq = std::string(sequence),
-        .qual = std::nullopt,
-        .forward_strain = true,
+        -1,                    // read_id
+        left_bound,            // left_bound
+        right_bound,           // right_bound
+        std::string(sequence), // seq
+        std::nullopt,          // qual
+        true                   // forward_strain
     });
   }
 
@@ -193,30 +247,31 @@ public:
 
     auto kmer_size = std::ceil(std::log2(read_len) * 2.5);
     // TODO: adjust it by coverage of fragments or something else
-    auto min_occ = 4;
-
+    auto fout = std::ofstream("/mnt/ec/ness/yolkee/thesis/tests/a.txt");
     for (std::size_t i = 0; i < param.MAX_ITERATIONS; ++i) {
-      spdlog::debug("Assemble: kmer_size = {}, min_occ = {}", kmer_size,
-                    min_occ);
+      // spdlog::debug("Assemble: kmer_size = {}", kmer_size);
       auto failed = false;
-      auto corrected_read = assemble_read(kmer_size, min_occ);
-      
+      auto corrected_read = assemble_read(kmer_size);
+
       switch (get_read_state(corrected_read)) {
       case State::ASSEMBLE_SUCCESS:
+
+        fout << corrected_read << '\n';
         return corrected_read;
       case State::ASSEMBLE_TOO_LONG:
       case State::ASSEMBLE_TOO_SHORT:
-        spdlog::debug("Assemble read length({}) is not ideal({} - {}), increase "
-                      "kmer size({})",
-                      corrected_read.size(),
-                      std::size_t(read_len * param.ASSEMBLE_TOO_SHORT_RATIO), 
-                      std::size_t(read_len * param.ASSEMBLE_MAX_LEN_RATIO), 
-                      kmer_size + param.INCREASE_KMER_SIZE);
+        // spdlog::debug("Assemble read length({}) is not ideal({} - {}),
+        // increase "
+        //               "kmer size({})",
+        //               corrected_read.size(),
+        //               std::size_t(read_len * param.ASSEMBLE_TOO_SHORT_RATIO),
+        //               std::size_t(read_len * param.ASSEMBLE_MAX_LEN_RATIO),
+        //               kmer_size + param.INCREASE_KMER_SIZE);
         kmer_size += param.INCREASE_KMER_SIZE;
         break;
       case State::ASSEMBLE_FAILED:
         failed = true;
-        spdlog::debug("Assemble failed");
+        // spdlog::debug("Assemble failed");
         break;
       }
       if (failed) {
@@ -280,6 +335,8 @@ public:
     // }
     // return std::string{};
   }
+
+  auto clear() { seqs.clear(); }
 
 private:
   std::size_t read_len;

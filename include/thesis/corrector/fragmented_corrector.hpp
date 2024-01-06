@@ -1,202 +1,30 @@
 #pragma once
 
-
-#include <concepts>
 #include <execution>
-#include <filesystem>
 #include <future>
 #include <mutex>
-#include <numeric>
-#include <optional>
-#include <queue>
 #include <ranges>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
 
-#include <spoa/spoa.hpp>
 #include <edlib.h>
+#include <spoa/spoa.hpp>
 
+#include "detail/window.hpp"
 #include "thesis/algo/assemble/read_assembler.hpp"
+#include "thesis/corrector/detail/overlap.hpp"
 #include "thesis/corrector/detail/read.hpp"
 #include "thesis/corrector/detail/sequence.hpp"
 #include "thesis/corrector/detail/window.hpp"
 #include "thesis/format/paf.hpp"
 #include "thesis/utility/threadpool/threadpool.hpp"
 
-/**
- * @brief align overlap part between query read and target read, and return the
- * cigar string
- *
- * @param q subsequence on query read
- * @param t subsequence on target read
- * @return bio::Cigar
- */
-auto align(const std::string_view q, const std::string_view t) {
-  auto aln = edlibAlign(
-      q.data(), q.size(), t.data(), t.size(),
-      edlibNewAlignConfig(-1, EDLIB_MODE_NW, EDLIB_TASK_PATH, nullptr, 0));
-
-  if (aln.status != EDLIB_STATUS_OK) {
-    spdlog::error(
-        "Error when align overlap part of query read and target read");
-    exit(EXIT_FAILURE);
-  }
-  /* there's no *X* in cigar string when using `EDLIB_CIGAR_STANDARD */
-  /* if you wanna contain mismatch info, please use `EDLIB_CIGAR_EXTENDED */
-  auto* s = edlibAlignmentToCigar(aln.alignment, aln.alignmentLength,
-                                  EDLIB_CIGAR_STANDARD);
-  auto cigar = bio::Cigar(s);
-  std::free(s);
-  edlibFreeAlignResult(aln);
-  return cigar;
-}
-
-/**
- * @brief following the implementation of `find_breakpoints_from_cigar` in racon
- * but do a little bit optimization
- *
- * @link https://github.com/isovic/racon/blob/master/src/overlap.cpp
- *
- */
-template <std::ranges::range R>
-auto find_breakpoints_from_cigar(const bio::Cigar& cigar, const R window_range,
-                                 const bio::PafRecord& overlap) {
-  auto window_cnt = std::ranges::size(window_range);
-  auto [q_start, q_end] = std::make_pair(overlap.q_start, overlap.q_end);
-  auto [t_start, t_end] = std::make_pair(overlap.t_start, overlap.t_end);
-
-  /* corresponding interval of target read and query read in each window */
-  auto t_breakpoints =
-      std::vector<std::pair<std::size_t, std::size_t>>(window_cnt);
-  auto q_breakpoints =
-      std::vector<std::pair<std::size_t, std::size_t>>{window_cnt};
-
-  /* iterator for query read and target read */
-  auto [q_iter, t_iter] = std::make_pair(q_start, t_start);
-  auto q_last_match = q_iter;
-  auto t_last_match = t_iter;
-
-  /* store the window indexes that window is not begin at 'M' region */
-  auto wait_for_first_match = std::queue<std::size_t>{};
-
-  /* store the window indexes that not reach the end of window */
-  auto wait_for_last_match = std::queue<std::size_t>{};
-
-  /**
-   * @brief set the start position of target read when meet a match or mismatch
-   * in cigar string for each window.
-   */
-  auto set_start_pos_when_match = [&](std::size_t idx) {
-    t_breakpoints[idx].first = t_iter;
-    q_breakpoints[idx].first = q_iter;
-    wait_for_last_match.push(idx);
-  };
-
-  /**
-   * @brief when q_iter increase, check whether the window inside
-   * `wait_for_first_match` and `wait_for_last_match` reach the end or not.
-   *
-   * for `wait_for_first_match`, if window not begin at 'M' region but reach
-   * the end, set interval as an empty sequence.
-   *
-   * for `wait_for_last_match`, if window reach the end, record the last match
-   * position of query read and target read.
-   */
-  auto check_whether_reach_end = [&]() {
-    while (!wait_for_first_match.empty()) {
-      auto idx = wait_for_first_match.front();
-      if (q_iter + 1 == std::min(q_end, window_range[idx].end)) {
-        wait_for_first_match.pop();
-        q_breakpoints[idx].first = q_breakpoints[idx].second = q_iter + 1;
-      } else {
-        break;
-      }
-    }
-    while (!wait_for_last_match.empty()) {
-      auto idx = wait_for_last_match.front();
-      /* q_end < window_range[idx].end -> the last window */
-      if (q_iter + 1 == std::min(q_end, window_range[idx].end)) {
-        wait_for_last_match.pop();
-        t_breakpoints[idx].second = t_last_match + 1;
-        q_breakpoints[idx].second = q_last_match + 1;
-      } else {
-        break;
-      }
-    }
-  };
-
-  auto w_idx = 0u;
-  for (const auto& [len, op] : cigar) {
-    if (op == 'M') {
-      while (!wait_for_first_match.empty()) {
-        auto idx = wait_for_first_match.front();
-        wait_for_first_match.pop();
-        set_start_pos_when_match(idx);
-      }
-      for (auto i = 0; i < len; i++, q_iter++, t_iter++) {
-        /**
-         * q_start > window_range[w_idx].start -> the first window
-         *
-         * while loop may run twice when two window start at same position,
-         * which means the length of first window is less than
-         * `Window::window_extend_len`
-         */
-        q_last_match = q_iter;
-        t_last_match = t_iter;
-        while (w_idx < window_cnt &&
-               q_iter == std::max(q_start, window_range[w_idx].start)) {
-          set_start_pos_when_match(w_idx);
-          w_idx++;
-        }
-        check_whether_reach_end();
-      }
-    } else if (op == 'I') {
-      for (auto i = 0; i < len; i++, q_iter++) {
-        while (w_idx < window_cnt &&
-               q_iter == std::max(q_start, window_range[w_idx].start)) {
-          wait_for_first_match.push(w_idx);
-          w_idx++;
-        }
-        check_whether_reach_end();
-      }
-    } else if (op == 'D') {
-      t_iter += len;
-    } else {
-      spdlog::error("unknown cigar operation: {}", op);
-      std::exit(EXIT_FAILURE);
-    }
-  }
-
-  /* transform coordinate system to target read if relative is reverse */
-  if (overlap.strand == '-') {
-    for (auto i = 0ul; i < window_cnt; i++) {
-      auto len = t_breakpoints[i].second - t_breakpoints[i].first;
-      auto offset = t_breakpoints[i].first - t_start;
-      t_breakpoints[i] = std::make_pair(t_end - offset - len, t_end - offset);
-    }
-  }
-
-  /* transform coordinate system relative to each window */
-  for (auto i = 0; i < window_cnt; i++) {
-    // spdlog::debug("({}, {}) <-> ({}, {})", q_breakpoints[i].first,
-    //               q_breakpoints[i].second, window_range[i].start,
-    //               window_range[i].end);
-    assert(q_breakpoints[i].first >= window_range[i].start &&
-           q_breakpoints[i].first <= window_range[i].end &&
-           "q_breakpoints[i].first out of range");
-    q_breakpoints[i].first -= window_range[i].start;
-    q_breakpoints[i].second -= window_range[i].start;
-  }
-
-  return std::make_pair(std::move(q_breakpoints), std::move(t_breakpoints));
-}
-
 template <class R>
   requires std::derived_from<R, bio::FastaRecord<R::encoded>>
 class FragmentedReadCorrector {
- private:
+private:
   /**
    * for the purpose of using `using BaseReadCorrector<R>::{}` here, please
    * refer to links below
@@ -210,19 +38,40 @@ class FragmentedReadCorrector {
    */
   using Read = ReadWrapper<R>;
 
+  struct Param {
+    /* minimum length of read that will be corrected */
+    const std::size_t min_read_length = 500ul;
+
+    /* minimum overlap length between query read and target read */
+    const std::size_t min_overlap_length = 500ul;
+
+    /* extend length on start and end of overlap */
+    const std::size_t overlap_extend_len = 25ul;
+
+    /* longest length of a window */
+    const std::size_t max_window_len = 450ul;
+
+    /**
+     * overlap length of adjanency window. Therefore, typical length of a
+     * window would be (window_len + 2 * window_extend_len)
+     */
+    const std::size_t window_extend_len = 25ul;
+
+  } param;
+
   /**
    * @brief Get the range of bio::PafRecord with the same read name.
    *
    * @param read_name name of the read
    * @return std::ranges::subrange
    */
-  auto get_overlap_range(const std::string_view read_name) {
-    auto st = std::ranges::lower_bound(overlaps, read_name, {},
-                                       &bio::PafRecord::q_name);
-    auto ed = std::ranges::upper_bound(overlaps, read_name, {},
-                                       &bio::PafRecord::q_name);
+  auto get_overlap_range(const std::string &read_name) {
+    auto read_id = name2id[read_name];
+    auto st = std::ranges::lower_bound(overlaps, read_id, {}, &Overlap::q_id);
+    auto ed = std::ranges::upper_bound(overlaps, read_id, {}, &Overlap::q_id);
     return std::ranges::subrange(st, ed);
   }
+
 
   /**
    * @brief
@@ -233,77 +82,12 @@ class FragmentedReadCorrector {
    * @param overlap_range
    * @return std::vector<Window>
    */
-  auto make_windows(const Read& raw_read) {
-    auto windows = std::vector<Window>{};
+  auto make_windows_for_one_read(Read &raw_read) {
+    
+    raw_read.init_windows(param.max_window_len, param.window_extend_len);
 
-    /* initialize boundaries and backbone sequence for each window */
-    for (auto pos = 0ul; pos < raw_read.seq.size(); pos += param.window_len) {
-      auto w_idx = windows.size();
-      auto window = Window{raw_read.id, w_idx, pos, pos + param.window_len};
-      window.extend(param.window_extend_len, raw_read.seq.size());
-
-      window.backbone.read_id = raw_read.id;
-      window.backbone.left_bound = window.start;
-      window.backbone.right_bound = window.end;
-      std::tie(window.backbone.seq, window.backbone.qual) =
-          raw_read.subview(true, window.start, window.end);
-      window.backbone.forward_strain = true;
-
-      // ? if the last window is too short, that means the right bound of the
-      // ? second to last window is the end of read, then should we remove the
-      // ? last window?
-      windows.emplace_back(std::move(window));
-    }
-
-    auto get_window_range = [&](std::size_t start, std::size_t end) {
-      auto st = std::ranges::upper_bound(windows, start, {}, &Window::start);
-      if (st != windows.end()) {
-        st = std::prev(st);
-      }
-      auto ed = std::ranges::lower_bound(windows, end, {}, &Window::start);
-      return std::ranges::subrange(st, ed);
-    };
-
-    for (const auto& overlap : get_overlap_range(raw_read.name)) {
-      auto t_id = name2id[overlap.t_name];
-      auto forward_strain = (overlap.strand == '+');
-
-      auto [q_start, q_end] = std::make_pair(overlap.q_start, overlap.q_end);
-      auto [t_start, t_end] = std::make_pair(overlap.t_start, overlap.t_end);
-      auto [q_seq_view, q_qual_view] = raw_read.subview(true, q_start, q_end);
-      auto [t_seq_view, t_qual_view] =
-          reads[t_id].subview(forward_strain, t_start, t_end);
-      auto window_range = get_window_range(q_start, q_end);
-      auto window_idx = window_range.begin() - windows.begin();
-
-      auto cigar = align(q_seq_view, t_seq_view);
-      auto [q_breakpoints, t_breakpoints] =
-          find_breakpoints_from_cigar(cigar, window_range, overlap);
-      const auto window_cnt = std::ranges::size(window_range);
-      assert(q_breakpoints.size() == t_breakpoints.size() &&
-             "size not equal between q_breakpoints and t_breakpoints");
-
-      for (auto i = 0u; i < window_cnt; i++, window_idx++) {
-        auto& window = windows[window_idx];
-        auto& [t_window_st, t_window_ed] = t_breakpoints[i];
-        if (t_window_st >= t_end) {
-          continue;
-        }
-        assert(t_window_ed >= t_window_st &&
-               "t_window_ed < t_window_st, wrong boundary");
-        auto [t_window_seq, t_window_qual] =
-            reads[t_id].subview(forward_strain, t_window_st, t_window_ed);
-
-        // when racon add sequence into window, it will store the pos of first
-        // match, then sort the overlap_seqs according the pos of first match
-        window.add_sequence(Sequence<>{.read_id = t_id,
-                                       .left_bound = t_window_st,
-                                       .right_bound = t_window_ed,
-                                       .seq = t_window_seq,
-                                       .qual = t_window_qual,
-                                       .forward_strain = forward_strain},
-                            q_breakpoints[i]);
-      }
+    for (const auto &overlap : get_overlap_range(raw_read.name)) {
+      raw_read.add_overlap_into_window(overlap, reads[overlap.t_id]);
     }
 
     // /* get all overlap of this read */
@@ -496,11 +280,95 @@ class FragmentedReadCorrector {
     //         std::string_view(raw_read.qual).substr(idxL, idxR - idxL + 1);
     //   }
     // }
-    return windows;
+    // return windows;
+  } 
+
+  auto ready_for_assemble(Read& raw_read) {
+    // TODO: if coverage is enough, then we can assemble the read
+    // remember that if we don't build the graph for this read, then there may
+    // have other read that doesn't have enough data for building graph, so we
+    // may need other mechanism to build the graph for this read.
+
+    if (!raw_read.is_finished()) {
+      return false;
+    }
+    for (auto t_id : raw_read.overlap_reads_id) {
+      if (!reads[t_id].is_finished()) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  auto window_pipeline(Window& window) {
+    
+    auto tid = threadpool.get_worker_id();
+    auto global_aln_engine = get_global_alignment_engine(param.max_window_len);
+    window.build_variation_graph(global_aln_engine);
+    auto corrected_fragments =
+        window.get_corrected_fragments(global_aln_engine);
+    for (auto &seq : corrected_fragments) {
+      auto lock = std::scoped_lock(mutexes[seq.read_id]);
+      reads[seq.read_id].add_corrected_fragment(std::move(seq));
+    }
+    window.clear();
+    reads[window.read_id].finished_windows_cnt += 1;
+    {
+      static std::atomic_int cnt = 0;
+      if (cnt % 10000 == 0) {
+        spdlog::debug("cnt = {}", cnt);
+      }
+      cnt++;
+    }
+  }
+
+  auto read_pipeline(Read& raw_read) {
+    raw_read.windows = make_windows_for_one_read(raw_read);
+    auto& windows = raw_read.windows;
+
+    for (auto& w : windows) {
+      auto [_, res] = threadpool.submit(window_pipeline, std::ref(w));
+      futures.emplace_back(std::move(res));
+    }
+    
+  }
+
+  auto make_windows_for_all_read() {
+    auto total_windows = 0ul;
+    auto total_seqs = 0ul;
+    auto total_seqs_lens = 0ul;
+    // const int take_reads = reads.size();
+    const int take_reads = 20;
+
+    spdlog::debug("Taking {} reads now", take_reads);
+    spdlog::info("Making windows for each reads...");
+
+#pragma omp parallel for num_threads(threads)                                  \
+    reduction(+ : total_windows, total_seqs)
+    for (int i = 0; i < take_reads; i++) {
+      auto &read = reads[i];
+      // for (auto& read : reads) {
+      make_windows_for_one_read(read);
+      total_windows += read.windows.size();
+      for (auto &w : read.windows) {
+        total_seqs += w.overlap_seqs.size();
+        for (auto &seq : w.overlap_seqs) {
+          total_seqs_lens += seq.seq.size();
+        }
+      }
+    }
+    spdlog::info("building window down");
+    spdlog::debug("average windows in a read = {:.2f}",
+                  static_cast<double>(total_windows) / take_reads);
+    spdlog::debug("average sequence inside a window = {:.2f}",
+                  static_cast<double>(total_seqs) / total_windows);
+    spdlog::debug("average sequence length inside a window = {:.2f}",
+                  static_cast<double>(total_seqs_lens) / total_seqs);
   }
 
 
- public:
+
+public:
   /**
    * @brief correct the read
    *
@@ -508,8 +376,6 @@ class FragmentedReadCorrector {
    */
   auto correct() {
     auto threadpool = bio::make_threadpool(threads);
-
-
 
     //   // TODO: random_view
     //   auto order = std::vector<std::size_t>(w.overlaps.size());
@@ -554,48 +420,19 @@ class FragmentedReadCorrector {
         global_alignment_engines(threads);
     for (auto i = 0u; i < threads; i++) {
       global_alignment_engines[i] =
-          get_global_alignment_engine(param.window_len);
+          get_global_alignment_engine(param.max_window_len);
     }
 
-    // auto batch_job = [&](Read& read) {
-    //   auto tid = threadpool.get_worker_id();
-    //   // auto local_aln_engine = local_alignment_engines[tid];
-    //   auto global_aln_engine = global_alignment_engines[tid];
-
-    //   auto build_window = [&](Window& w) {
-    //     w.build_variation_graph(global_aln_engine);
-
-    //     // auto corrected_fragments = w.get_corrected_fragments(global_aln_engine);
-    //     // for (auto& sequence : w.overlap_seqs) {
-    //     //   auto t_id = sequence.read_id;
-    //     //   // TODO: check the siz e of all pruned graph size
-    //     //   // TODO: is it small than window_len?
-    //     //   // TODO: or there's a lot of graph is not be pruned?
-    //     //   auto fragment =
-    //     //       w.get_corrected_fragment(local_aln_engine, sequence.seq);
-    //     //   // std::scoped_lock lock(mutexes[t_id]);
-    //     //   // reads[t_id].corrected_fragments.emplace_back(std::move(fragment));
-    //     // }
-    //   };
-    //   for (auto& w : read.windows) {
-    //     build_window(w);
-    //   }
-     
-    // };
-
-    auto batch_job = [&](Window& window) {
+    auto batch_job = [&](Window &window) {
       auto tid = threadpool.get_worker_id();
-      // auto local_aln_engine = local_alignment_engines[tid];
-      auto global_aln_engine = global_alignment_engines[tid];
-
-      window.build_variation_graph(global_aln_engine);
-
-      auto corrected_fragments = window.get_corrected_fragments(global_aln_engine);
-      for (auto& seq : corrected_fragments) {
+      auto engine = global_alignment_engines[tid];
+      // TODO: use thread_local
+      window.build_variation_graph(engine);
+      auto corrected_fragments = window.get_corrected_fragments(engine);
+      for (auto &seq : corrected_fragments) {
         auto lock = std::scoped_lock(mutexes[seq.read_id]);
-        reads[seq.read_id].add_corrected_fragment(seq);
+        reads[seq.read_id].add_corrected_fragment(std::move(seq));
       }
-      corrected_fragments.clear();
       window.clear();
       {
         static std::atomic_int cnt = 0;
@@ -606,88 +443,76 @@ class FragmentedReadCorrector {
       }
     };
 
-    auto total_windows = 0ul;
-    auto total_seqs = 0ul;
-    auto total_seqs_lens = 0ul;
-    const int take_reads = reads.size();
-
-    spdlog::debug("Taking {} reads now", take_reads);
-    spdlog::info("Making windows for each reads...");
-
-#pragma omp parallel for num_threads(threads) \
-    reduction(+ : total_windows, total_seqs)
-    for (int i = 0; i < take_reads; i++) {
-      auto& read = reads[i];
-      // for (auto& read : reads) {
-      read.windows = make_windows(read);
-      total_windows += read.windows.size();
-      for (auto& w : read.windows) {
-        total_seqs += w.overlap_seqs.size();
-        for (auto& seq : w.overlap_seqs) {
-          total_seqs_lens += seq.seq.size();
-        }
-      }
-    }
-    spdlog::info("building window down");
-    spdlog::debug("average windows in a read = {:.2f}", 
-                  static_cast<double>(total_windows) / take_reads);
-    spdlog::debug("average sequence inside a window = {:.2f}",
-                  static_cast<double>(total_seqs) / total_windows);
-    spdlog::debug("average sequence length inside a window = {:.2f}",
-                  static_cast<double>(total_seqs_lens) / total_seqs);
+    make_windows_for_all_read();
 
     std::vector<std::future<void>> futures;
-
     spdlog::info("Start building variation graph for each reads");
-    // TODO: random_view
-    for (auto& read : reads | std::views::take(take_reads)) {
-      for (auto&& window : read.windows) {
-        auto [_, res] = threadpool.submit(batch_job, std::ref(window));
+
+    auto target = "01_10002";
+    auto target_id = name2id[target];
+    spdlog::debug("target id = {}", target_id);
+
+    for (auto &read : reads | std::views::take(20)) {
+      for (auto &w : read.windows) {
+        auto [_, res] = threadpool.submit(batch_job, std::ref(w));
         futures.emplace_back(std::move(res));
       }
     }
-    for (auto& f : futures) {
+    for (auto &f : futures) {
       f.get();
     }
 
+    // auto dir = fs::path("{}/fragments", TMP_PATH);
+    // fs::remove_all(dir);
+    // fs::create_directories(dir);
+    // for (int i = 0; i < reads.size(); i++) {
+    //   spdlog::debug("{}, fragments size = {}", i, reads[i].corrected_fragments.size()); 
+    //   auto p = fmt::format("{}/{}.txt", dir.string(), reads[i].name);
+    //   std::ofstream fout(p);
+    //   for (const auto& s :reads[i].corrected_fragments) {
+    //     fout << id2name[s.read_id] << '\t';
+    //     fout << s.left_bound << '\t';
+    //     fout << s.right_bound << '\t';
+    //     fout << s.seq << '\n';
+    //   }
+    // }
 
-
-
+    spdlog::debug("Start assemble reads");
+    std::vector<bio::FastaRecord<false>> corrected_reads;
+    auto fout = std::ofstream(TMP_PATH"/wrong2.txt");
+    
 
     
-    // {
-    //   auto nodes_fout = std::ofstream("/mnt/ec/ness/yolkee/thesis/tests/stat/nodes.txt");
-    //   auto edges_fout = std::ofstream("/mnt/ec/ness/yolkee/thesis/tests/stat/edges.txt");
-    //   for (auto i = 0u; i < reads.size(); i++) {
-    //     for (auto& w : reads[i].windows) {
-    //       auto [nodes_size, edges_size] = w.get_graph_info();
-    //       nodes_fout << nodes_size << ' ';
-    //       edges_fout << edges_size << ' ';
-    //     }
-    //   }
-    //   nodes_fout << '\n';
-    //   edges_fout << '\n';
-    // }
+// #pragma omp parallel for num_threads(threads)
+//     for (auto &read : reads) {
+//       // spdlog::debug("Assemble read {}, len = {}", id2name[read.id],
+//       // read.len());
+//       auto corrected_read = read.get_corrected_read();
+//       corrected_read.name = id2name[read.id];
 
-    // {
-    //   auto fout = std::ofstream("/mnt/ec/ness/yolkee/thesis/tests/stat/graph.txt");
-    //   for (auto i = 0; i < reads.size(); i++) {
-    //     auto& read = reads[i];
-    //     fout << read.len() << ' ' << read.assembler.get_graph_size() << '\n';
+//       #pragma omp critical
+//       if (corrected_read.seq.size() != 0) {
+//         corrected_reads.emplace_back(std::move(corrected_read));
+//         if (corrected_reads.size() % 100 == 0) {
+//           spdlog::debug("Corrected {} reads", corrected_reads.size());
+//         }
+//       }
+//     }
+
+    return corrected_reads;
+
+    // fs::remove_all("/mnt/ec/ness/yolkee/thesis/tests/fragments");
+    // fs::create_directories("/mnt/ec/ness/yolkee/thesis/tests/fragments");
+    // for (int i = 0; i < reads.size(); i++) {
+    //   spdlog::debug("{}, fragments size = {}", i,
+    //   reads[i].corrected_fragments.size()); auto p =
+    //   fmt::format("/mnt/ec/ness/yolkee/thesis/tests/fragments/{}.txt",reads[i].name);
+    //   std::ofstream fout(p);
+    //   for (const auto& s :reads[i].corrected_fragments) {
+    //     fout << s.left_bound << '\t' << s.right_bound << '\t' << s.seq <<
+    //     '\n';
     //   }
     // }
-
-    fs::remove_all("/mnt/ec/ness/yolkee/thesis/tests/fragments");
-    fs::create_directories("/mnt/ec/ness/yolkee/thesis/tests/fragments");
-    for (int i = 0; i < reads.size(); i++) {
-      spdlog::debug("{}, fragments size = {}", i, reads[i].corrected_fragments.size());
-      auto p = fmt::format("/mnt/ec/ness/yolkee/thesis/tests/fragments/{}.txt",reads[i].name); 
-      std::ofstream fout(p); 
-      for (const auto& s :reads[i].corrected_fragments) {
-        fout << s.left_bound << '\t' << s.right_bound << '\t' << s.seq << '\n';
-      }
-    }
-    std::exit(0);
 
     // for (auto prev_idx = 0, idx = 0, sum = 0; idx < (int) reads.size();
     // idx++) {
@@ -763,8 +588,6 @@ class FragmentedReadCorrector {
     // for (auto& raw_read : raw_reads | std::views::take(1)) {
     //   spdlog::info("read name: {}", raw_read.name);
     //   // auto windows = std::vector<Window>();
-
-    //   /* TODO: assign backbone sequence to each window */
 
     //   /* get all overlap of this read */
     //   auto range = get_overlap_range(raw_read.name);
@@ -874,9 +697,6 @@ class FragmentedReadCorrector {
     //   //   spdlog::info("{} <-> {}", overlap.tname, overlap.qname);
     //   // }
     // }
-
-    auto corrected_read = std::vector<bio::FastaRecord<false>>{};
-    return corrected_read;
   }
 
   auto print_info() -> void {
@@ -894,11 +714,12 @@ class FragmentedReadCorrector {
   }
 
   FragmentedReadCorrector(
-      std::vector<R>&& raw_reads, std::vector<bio::PafRecord>&& overlaps,
-      const std::string& platform,
+      std::vector<R> &&raw_reads, std::vector<bio::PafRecord> &&overlaps,
+      const std::string &platform,
       const int thread_num = std::thread::hardware_concurrency(),
       bool debug = false)
-      : platform(platform), threads(thread_num), debug(debug) {
+      : platform(platform), threads(thread_num),
+        threadpool(bio::make_threadpool(this->threads)), debug(debug) {
     unfiltered_raw_read_size = raw_reads.size();
     unfiltered_overlap_size = overlaps.size();
 
@@ -909,29 +730,29 @@ class FragmentedReadCorrector {
     mutexes = std::vector<std::mutex>(raw_reads_size);
   }
 
- private:
+private:
   /**
    * @brief
    *
    * @param reads
    * @return auto
    */
-  auto read_preprocess(std::vector<R>& raw_reads) {
+  auto read_preprocess(std::vector<R> &raw_reads) {
     spdlog::info("Read preprocessing...");
 
     /* there's no std::ranges::move_if() */
-    for (auto& r : raw_reads) {
+    for (auto &r : raw_reads) {
       if (r.seq.size() >= param.min_read_length) {
         reads.emplace_back(std::move(r));
       }
     }
-    // TODO: sort by name is not a proper way, we may face some bias at assembly
-    // stage
-    std::sort(std::execution::par, reads.begin(), reads.end());
+
+    // compile error
+    // std::sort(std::execution::par, reads.begin(), reads.end());
     raw_reads_size = reads.size();
 
     /* transform read name to id */
-    for (auto& raw_read : reads) {
+    for (auto &raw_read : reads) {
       raw_read.id = name2id.size();
       name2id[raw_read.name] = raw_read.id;
       id2name[raw_read.id] = raw_read.name;
@@ -944,7 +765,7 @@ class FragmentedReadCorrector {
    * @param overlaps
    * @return
    */
-  auto overlap_preprocess(std::vector<bio::PafRecord>& overlaps) {
+  auto overlap_preprocess(std::vector<bio::PafRecord> &overlaps) {
     spdlog::info("Overlap preprocessing...");
 
     // In original .paf file of overlaps between raw_reads, the match base
@@ -952,17 +773,17 @@ class FragmentedReadCorrector {
     // and why it is so low.
     // const auto min_overlap_identity = 0.7l;
 
-    auto valid_overlap = [&](const bio::PafRecord& overlap) {
+    auto valid_overlap = [&](const bio::PafRecord &paf) {
       auto valid_read = [&](const std::string_view name) {
-        return std::ranges::binary_search(reads, name, {}, &Read::name);
+        return name2id.contains(name);
       };
-      if (!valid_read(overlap.q_name) || !valid_read(overlap.t_name)) {
+      if (!valid_read(paf.q_name) || !valid_read(paf.t_name)) {
         return false;
       }
-      if (overlap.q_name == overlap.t_name) {
+      if (paf.q_name == paf.t_name) {
         return false;
       }
-      if (overlap.aln_len < param.min_overlap_length) {
+      if (paf.aln_len < param.min_overlap_length) {
         return false;
       }
       {
@@ -976,22 +797,22 @@ class FragmentedReadCorrector {
         //    -
         //    https://github.com/natir/fpa/blob/master/src/filter/internalmatch.rs
 
-        auto q_overlap_len = overlap.q_end - overlap.q_start + 1;
-        auto t_overlap_len = overlap.t_end - overlap.t_start + 1;
+        auto q_overlap_len = paf.q_end - paf.q_start + 1;
+        auto t_overlap_len = paf.t_end - paf.t_start + 1;
         auto possible_match_ratio =
             std::min(q_overlap_len, t_overlap_len) /
-            (double) std::max(q_overlap_len, t_overlap_len);
+            (double)std::max(q_overlap_len, t_overlap_len);
         if (possible_match_ratio < 0.7) {
           return false;
         }
 
         const double internal_threshold = 0.8;
-        auto q_head_len = overlap.q_start;
-        auto q_tail_len = overlap.q_len - overlap.q_end;
-        auto t_head_len = overlap.t_start;
-        auto t_tail_len = overlap.t_len - overlap.t_end;
+        auto q_head_len = paf.q_start;
+        auto q_tail_len = paf.q_len - paf.q_end;
+        auto t_head_len = paf.t_start;
+        auto t_tail_len = paf.t_len - paf.t_end;
         auto overhang_len =
-            overlap.strand == '+'
+            paf.strand == '+'
                 ? std::min(q_head_len,
                            t_head_len + std::min(q_tail_len, t_tail_len))
                 : std::min(q_head_len,
@@ -1010,17 +831,26 @@ class FragmentedReadCorrector {
       return true;
     };
 
-    auto filtered_overlaps = std::vector<bio::PafRecord>{};
+    auto filtered_overlaps = std::vector<Overlap>{};
     auto reads_need_create_rc = std::vector<int>(raw_reads_size, false);
-    /* there's no std::ranges::move_if(), so sad */
 #pragma omp parallel for
-    for (auto& overlap : overlaps) {
-      if (valid_overlap(overlap)) {
+    for (auto &paf : overlaps) {
+      /* there's no std::ranges::move_if(), so sad */
+      if (valid_overlap(paf)) {
         /* add reverse complement sequence and reverse quality if needed */
-        if (overlap.strand == '-') {
-          auto tid = name2id[overlap.t_name];
+        if (paf.strand == '-') {
+          auto tid = name2id[paf.t_name];
           reads_need_create_rc[tid] = true;
         }
+        auto overlap = Overlap{.q_id = name2id[paf.q_name],
+                               .q_idx_L = paf.q_start,
+                               .q_idx_R = paf.q_end,
+                               .q_seq_len = paf.q_len,
+                               .t_id = name2id[paf.t_name],
+                               .t_idx_L = paf.t_start,
+                               .t_idx_R = paf.t_end,
+                               .t_seq_len = paf.t_len,
+                               .forward_strain = (paf.strand == '+')};
         overlap.extend(param.overlap_extend_len);
 #pragma omp critical
         filtered_overlaps.emplace_back(std::move(overlap));
@@ -1039,37 +869,18 @@ class FragmentedReadCorrector {
     std::swap(this->overlaps, filtered_overlaps);
   }
 
-  struct Param {
-    /* minimum length of read that will be corrected */
-    const std::size_t min_read_length = 500ul;
 
-    /* minimum overlap length between query read and target read */
-    const std::size_t min_overlap_length = 500ul;
-
-    /* extend length on start and end of overlap */
-    const std::size_t overlap_extend_len = 50ul;
-
-    /* length of a window */
-    const std::size_t window_len = 470ul;
-
-    /**
-     * overlap length of adjanency window. Therefore, typical length of a
-     * window would be (window_len + 2 * window_extend_len)
-     */
-    const std::size_t window_extend_len = 15ul;
-
-  } param;
-
-  /* how much reads in original data */
+  /* how may reads in original data */
   std::size_t unfiltered_raw_read_size;
-  /* how much overlap records in original data */
+  /* how many paf records(overlap) in original data */
   std::size_t unfiltered_overlap_size;
 
   /* overlap information between `raw_reads` */
-  std::vector<bio::PafRecord> overlaps;
+  std::vector<Overlap> overlaps;
 
   /* size of filtered read */
   std::size_t raw_reads_size;
+
   /* size of filtered overlaps */
   std::size_t overlaps_size;
 
@@ -1078,17 +889,20 @@ class FragmentedReadCorrector {
   std::string platform;
 
   /* mapping from read name to read id and vice versa */
-  std::map<std::string, std::size_t> name2id;
+  std::map<std::string, std::size_t, std::less<>> name2id;
   std::map<std::size_t, std::string> id2name;
 
   /* threads */
   std::size_t threads;
+  bio::ThreadPool<> threadpool;
+  std::vector<std::future<void>> futures;
 
-  /* debug flag */
-  bool debug = false;
 
   /* read wrapper, contains additional information */
   /* reads.size() == mutexes.size() == raw_reads_size */
   std::vector<Read> reads;
   std::vector<std::mutex> mutexes;
+
+  /* debug flag */
+  bool debug = false;
 };

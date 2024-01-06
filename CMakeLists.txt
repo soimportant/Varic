@@ -11,13 +11,21 @@ if (NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE "Release")
 endif()
 
-set(CMAKE_CXX_FLAGS_RELEASE "-Ofast")
+message("Build type: ${CMAKE_BUILD_TYPE}")
+set(CMAKE_CXX_FLAGS_RELEASE "-O2")
 set(CMAKE_CXX_FLAGS_DEBUG "-O2 -g")
-# set(CMAKE_CXX_FLAGS_DEBUG "-O2 -g -fsanitize=address")
+# set(CMAKE_CXX_FLAGS_DEBUG "-O2 -g -fsanitize=address -fsanitize=undefined")
 
-
+# boost
+# set(BOOST_ROOT "/mnt/ec/ness/yolkee/miniconda3/envs/bio/include/boost/")
+# set(BOOST_LIBRARYDIR "/mnt/ec/ness/yolkee/miniconda3/envs/bio/include")
 find_package(Boost COMPONENTS program_options thread graph system filesystem REQUIRED)
+link_libraries(${Boost_LIBRARIES})
+include_directories(${Boost_INCLUDE_DIRS})
+
+# Openmp
 find_package(OpenMP REQUIRED)
+link_libraries(OpenMP::OpenMP_C OpenMP::OpenMP_CXX)
 
 # biovoltron
 set(BIOVOLTRON_TESTS OFF)
@@ -32,10 +40,10 @@ add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/include/spoa)
 link_libraries(spdlog spoa::spoa ${Boost_LIBRARIES} biovoltron edlib OpenMP::OpenMP_C OpenMP::OpenMP_CXX tcmalloc profiler)
 
 include_directories(${CMAKE_CURRENT_LIST_DIR}/include)
-include_directories(${CMAKE_CURRENT_LIST_DIR}/submodules/edlib/edlib/include)
 
 add_compile_definitions(DATA_PATH="/mnt/ec/mammoth/yolkee/thesis/data"
-RESULT_PATH="/mnt/ec/mammoth/yolkee/thesis/result")
+RESULT_PATH="/mnt/ec/mammoth/yolkee/thesis/result"
+TMP_PATH="/mnt/ec/ness/yolkee/thesis/tmp")
 
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -Wall -Wextra")
 

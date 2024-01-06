@@ -45,7 +45,7 @@ auto check_argument(const bpo::variables_map& vmap) {
   check_file_format("raw_read", reads_path,
                     FILE_FORMAT::FASTA | FILE_FORMAT::FASTQ);
   check_file_format("overlap_info", overlap_path, FILE_FORMAT::PAF);
-  auto fout = std::ofstream(output_path, std::ios::out);
+  auto fout = std::ofstream(output_path, std::ios::app);
   if (!fout.is_open()) {
     spdlog::error("Cannot open output file: {}", output_path.string());
     exit(1);
@@ -70,7 +70,9 @@ int main(int argc, char* argv[]) {
    * 3. output path
    * 4. sequencing platform
    */
-
+  
+  auto start = std::chrono::steady_clock::now();
+  
   bpo::options_description opts{};
   bpo::variables_map vmap;
   try {
@@ -118,8 +120,6 @@ int main(int argc, char* argv[]) {
   omp_set_num_threads(thread);
 
   auto overlap = read_records<bio::PafRecord>(overlap_path);
-  auto start = std::chrono::steady_clock::now();
-  
   auto call_corrector = [&]<class R>() {
     auto raw_reads = read_records<R>(reads_path);
     auto correcter = FragmentedReadCorrector<R>(std::move(raw_reads),
@@ -142,8 +142,8 @@ int main(int argc, char* argv[]) {
       std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
           .count());
 
-  auto fout = std::ofstream(output_path, std::ios::out);
-  for (auto& r : corrected_read) {
-    fout << r;
-  }
+  // auto fout = std::ofstream(output_path, std::ios::out);
+  // for (auto& r : corrected_read) {
+  //   fout << r << std::endl;
+  // }
 }

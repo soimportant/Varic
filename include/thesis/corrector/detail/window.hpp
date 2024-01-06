@@ -4,9 +4,11 @@
 #include <cassert>
 #include <numeric>
 #include <optional>
-#include <spoa/spoa.hpp>
 #include <string_view>
 #include <vector>
+
+#include <spdlog/spdlog.h>
+#include <spoa/spoa.hpp>
 
 #include "thesis/corrector/detail/sequence.hpp"
 
@@ -31,7 +33,8 @@ auto get_global_alignment_engine(const std::size_t max_length = 0) {
       spoa::AlignmentType::kNW, // Needleman-Wunsch(global alignment)
       5,                        // match (default parameter form SPOA)
       -4,                       // mismatch
-      -8                        // gap
+      -8,                       // gap
+      -6                        // gap extension
   );
   if (max_length != 0) {
     aln_engine->Prealloc(max_length, 5);
@@ -66,6 +69,14 @@ public:
     end = end_;
   }
 
+  struct Param {
+    /**
+     * The length of longest path in pruned graph must greater than this value *
+     * len()
+     */
+    const double PRUNE_LEN_RATIO = 0.98;
+  } param;
+
   /**
    * @brief return the length of this window
    *
@@ -82,31 +93,15 @@ public:
     end = std::min(end + extend_len, max_len);
   }
 
-  auto add_sequence(const Sequence<> &seq,
+  auto add_sequence(Sequence<> seq,
                     const std::pair<std::size_t, std::size_t> &match_pos) {
-    if (match_pos.first == match_pos.second) {
-      return;
-    }
-    if (seq.len() == 0) {
+    if (match_pos.first == match_pos.second || seq.len() == 0) {
       return;
     }
     // TODO: consider about quality filter, low quality -> discard sequence
-
     overlap_seqs.emplace_back(std::move(seq));
     match_pos_at_query.emplace_back(match_pos);
   }
-
-  // auto print() const noexcept {
-  //   spdlog::debug("idxL = {}, idxR = {}", idxL, idxR);
-  //   spdlog::debug("backbone_seq.size() = {}", backbone_seq.size());
-  //   auto sum = std::accumulate(overlap_seqs.begin(), overlap_seqs.end(),
-  //   0ul,
-  //                              [](auto a, auto& b) { return a + b.size();
-  //                              });
-  //   spdlog::debug("average overlap_seqs len = {}", sum /
-  //   overlap_seqs.size()); spdlog::debug("get prune len = {}",
-  //   get_prune_len());
-  // }
 
   auto
   build_variation_graph(std::shared_ptr<spoa::AlignmentEngine> aln_engine) {
@@ -115,7 +110,7 @@ public:
         [&](const std::string_view seq,
             const std::optional<std::string_view> &qual,
             const std::pair<std::size_t, std::size_t> query_match_range) {
-          const auto &[q_match_st, q_match_ed] = query_match_range;
+          const auto [q_match_st, q_match_ed] = query_match_range;
           auto aln = spoa::Alignment{};
           const auto align_on_subgraph_len = len() * 0.02;
           if (query_match_range.first >= align_on_subgraph_len &&
@@ -150,10 +145,14 @@ public:
       align_and_push(overlap_seqs[x].seq, overlap_seqs[x].qual,
                      match_pos_at_query[x]);
     }
-    // print_graph_info();
+    // graph = graph.PruneGraph(len() * param.PRUNE_LEN_RATIO);
     graph = graph.PruneGraph(len());
-    // graph.Clear();
-    // print_graph_info();
+
+    // if (read_id < 10) {
+    //   auto path =
+    //       fs::path(fmt::format("{}/graph2/{}_{}.dot", TMP_PATH, read_id, idx));
+    //   graph.PrintDot(path);
+    // }
 
     // auto path =
     // fs::path(fmt::format("/mnt/ec/ness/yolkee/thesis/tests/graph/{}.dot",
@@ -181,20 +180,24 @@ public:
         aln = global_aln_engine->Align(seq.seq.data(), seq.seq.size(), graph);
       }
 
-      // std::ranges::find_last only exists in C++23, hell C++ committee
-      const auto head_not_align =
-          std::ranges::find(aln, -1, &std::pair<int, int>::first) - aln.begin();
-      const auto tail_not_align =
-          std::ranges::find(aln.rbegin(), aln.rend(), -1,
-                            &std::pair<int, int>::first) - aln.rbegin();
+      const auto head_not_align = std::ranges::distance(
+        aln.begin(),
+        std::ranges::find(aln, -1, &std::pair<int, int>::first)
+      );
+      // std::ranges::find_last exists in C++23, hell C++ committee
+      const auto tail_not_align = std::ranges::distance(
+        aln.rbegin(),
+        std::ranges::find(aln.rbegin(), aln.rend(), -1, 
+                          &std::pair<int, int>::first)
+      );
       auto corrected_fragment = graph.DecodeAlignment(aln);
       return Sequence<std::string>{
-          .read_id = seq.read_id,
-          .left_bound = seq.left_bound + head_not_align,
-          .right_bound = seq.right_bound - tail_not_align,
-          .seq = std::move(corrected_fragment),
-          .qual = std::string{}, // No quality for corrected sequence
-          .forward_strain = seq.forward_strain,
+          seq.read_id,                      // read_id
+          seq.left_bound + head_not_align,  // left_bound
+          seq.right_bound - tail_not_align, // right_bound
+          std::move(corrected_fragment),    // seq
+          std::string{},                    // qual
+          seq.forward_strain                // forward_strain
       };
     };
 
@@ -227,11 +230,14 @@ public:
     spdlog::debug("edges.size() = {}", graph.edges().size());
     spdlog::debug("sequences.size() = {}", graph.sequences().size());
     spdlog::debug("rank_to_node.size() = {}", graph.rank_to_node().size());
-    spdlog::debug("num_codes = {}\n\n\n", graph.num_codes());
+    spdlog::debug("num_codes = {}\n\n", graph.num_codes());
   }
 
-  auto get_graph_info() {
-    return std::make_pair(graph.nodes().size(), graph.edges().size());
+  void clear() {
+    // spdlog::debug("Window {} is destructed", idx);
+    match_pos_at_query.clear();
+    overlap_seqs.clear();
+    graph.Clear();
   }
 
   /* read id that this window belong */
@@ -249,13 +255,6 @@ public:
   /* the sequences that overlap with backbone seq */
   std::vector<std::pair<std::size_t, std::size_t>> match_pos_at_query;
   std::vector<Sequence<>> overlap_seqs;
-
-  void clear() {
-    // spdlog::debug("Window {} is destructed", idx);
-    // match_pos_at_query.clear();
-    // overlap_seqs.clear();
-    graph.Clear();
-  }
 
   ~Window() { clear(); }
 
