@@ -150,8 +150,14 @@ public:
                              std::forward<ArgType>(args)...);
   }
 
-  const auto get_worker_id() const {
+  auto get_worker_id() const {
     return thread_id_to_worker_id.at(std::this_thread::get_id());
+  }
+
+  auto join() {
+    for (auto& worker : workers) {
+      worker.join();
+    }
   }
 
   /**

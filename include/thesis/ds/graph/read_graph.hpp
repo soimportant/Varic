@@ -216,7 +216,7 @@ public:
           [](const auto &a, const auto &b) { return a + b.second; });
       return a_sum / a.size() > b_sum / b.size();
     });
-    spdlog::debug("There are {} paths.", paths.size());
+    // spdlog::debug("There are {} paths.", paths.size());
     for (auto &path : paths) {
       auto weight_sum = std::accumulate(
           path.begin(), path.end(), 0.0,
@@ -228,8 +228,8 @@ public:
       for (auto [v, w] : path) {
         s.push_back(g[v].kmer.back());
       }
-      spdlog::debug("candidate({}, {}, {:.3f}): {}, ", mn->second, mx->second,
-                    weight_sum / path.size(), s);
+      // spdlog::debug("candidate({}, {}, {:.3f}): {}, ", mn->second, mx->second,
+      //               weight_sum / path.size(), s);
     }
     assert(paths.size() > 0);
     return paths[0];
@@ -296,13 +296,13 @@ public:
           // spdlog::debug("Found previous branch point at {}, len = {}",
           //               g[prev_branch_v].kmer, old_path_len);
           assert(valid_path<Reverse>(new_path));
-          spdlog::debug("Found source point at {}, len = {}",
-                        g[prev_branch_v].kmer, old_path_len);
+          // spdlog::debug("Found source point at {}, len = {}",
+          //               g[prev_branch_v].kmer, old_path_len);
           auto reassembled_path = local_assemble<Reverse>(
               prev_branch_v, now_branch_v, old_path_len * param.LOCAL_ASSEMBLE_LENGTH_RATIO);
-          spdlog::debug("Found sink point at {}, len = {}", g[now_branch_v].kmer,
-                        reassembled_path.size());
-          spdlog::debug("=========================\n\n");
+          // spdlog::debug("Found sink point at {}, len = {}", g[now_branch_v].kmer,
+          //               reassembled_path.size());
+          // spdlog::debug("=========================\n\n");
 
           
 
@@ -317,7 +317,7 @@ public:
           // }
           assert(valid_path<Reverse>(new_path));
         } else {
-          spdlog::debug("New source found, need extend it!");
+          // spdlog::debug("New source found, need extend it!");
           new_path.clear();
           new_path.emplace_back(path[i]);
           // extend from source
@@ -354,7 +354,7 @@ public:
       const auto [v, w, pos] = stk.top();
       stk.pop();
       if (v == sink) {
-        spdlog::debug("Reach sink {}, branch_cnt = {}", g[v].kmer, branch_cnt);
+        // spdlog::debug("Reach sink {}, branch_cnt = {}", g[v].kmer, branch_cnt);
         return true;
       }
       if (pos >= max_assemble_len) {
@@ -720,7 +720,7 @@ public:
     // assert(valid_path<Reverse>(path));
 
     path = check_and_reassemble_path<Reverse>(path);
-    print_graphviz(path);
+    // print_graphviz(path);
     // spdlog::debug("after path.size() = {}", path.size());
     return concat_vertices<Reverse>(source, path);
 

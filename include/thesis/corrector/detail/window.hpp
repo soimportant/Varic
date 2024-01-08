@@ -103,8 +103,7 @@ public:
     match_pos_at_query.emplace_back(match_pos);
   }
 
-  auto
-  build_variation_graph(std::shared_ptr<spoa::AlignmentEngine> aln_engine) {
+  auto build_variation_graph(const std::unique_ptr<spoa::AlignmentEngine>& aln_engine) {
     assert(aln_engine != nullptr);
     auto align_and_push =
         [&](const std::string_view seq,
@@ -165,8 +164,7 @@ public:
     // ? 1. calcuate the coverage for first 10 and last 10 base, select
   }
 
-  auto get_corrected_fragments(
-      std::shared_ptr<spoa::AlignmentEngine> global_aln_engine) {
+  auto get_corrected_fragments(const std::unique_ptr<spoa::AlignmentEngine>& global_aln_engine) {
     assert(global_aln_engine != nullptr);
     auto local_aln_engine = get_local_alignment_engine();
 

@@ -166,6 +166,12 @@ public:
     return worker->get_id();
   }
 
+  auto join() {
+    worker->request_stop();
+    run_cv.notify_one();
+    worker->join();
+  }
+
   /**
    * @brief made a request to the worker for stop working
    * @return `true` if this invocation made a stop request or it doesn't running,

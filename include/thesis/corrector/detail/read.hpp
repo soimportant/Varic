@@ -26,7 +26,7 @@ public:
   ReadWrapper &operator=(const ReadWrapper &) = delete;
 
   /* move constructor */
-  ReadWrapper(ReadWrapper&& rhs) : assembler(std::move(rhs.assembler)) {
+  ReadWrapper(ReadWrapper&& rhs) : assembler(this->seq.size()) {
     this->id = rhs.id;
     this->name = std::move(rhs.name);
     this->seq = std::move(rhs.seq);
@@ -36,7 +36,9 @@ public:
     this->windows = std::move(rhs.windows);
     this->overlap_reads_id = std::move(rhs.overlap_reads_id);
     this->finished_windows_cnt = rhs.finished_windows_cnt.load();
-    // this->assembler = std::move(rhs.assembler);
+    this->need_corrected = rhs.need_corrected;
+    this->overlap_range = std::move(rhs.overlap_range);
+    this->assembler = std::move(rhs.assembler);
     this->is_assembled = rhs.is_assembled;
     this->corrected_fragments = std::move(rhs.corrected_fragments);
   }
@@ -52,6 +54,8 @@ public:
     this->windows = std::move(rhs.windows);
     this->overlap_reads_id = std::move(rhs.overlap_reads_id);
     this->finished_windows_cnt = rhs.finished_windows_cnt.load();
+    this->need_corrected = rhs.need_corrected;
+    this->overlap_range = std::move(rhs.overlap_range);
     this->assembler = std::move(rhs.assembler);
     this->is_assembled = rhs.is_assembled;
     this->corrected_fragments = std::move(rhs.corrected_fragments);
@@ -59,6 +63,8 @@ public:
   }
 
   ReadWrapper(R &&r) : R(std::move(r)), assembler(this->seq.size()){};
+
+  ReadWrapper() : assembler(0) {}
 
   /**
    * Retrieves a subrange of windows within a specified range.
@@ -307,7 +313,6 @@ public:
    */
   auto add_overlap_into_window(const Overlap &overlap,
                                const ReadWrapper<R> &t_read) {
-    overlap_reads_id.emplace_back(t_read.id);
     auto forward_strain = overlap.forward_strain;
 
     auto [q_start, q_end] = std::make_pair(overlap.q_idx_L, overlap.q_idx_R);
@@ -402,7 +407,7 @@ public:
    * position.
    * @throws std::out_of_range If the start position is out of range of the
    * sequence.
-   */
+   */ 
   auto subview(bool forward_strain, const std::size_t start,
                const std::size_t end) const {
     if (start > end) {
@@ -412,7 +417,7 @@ public:
     }
 
     if (start > this->seq.size()) {
-      spdlog::error("start position {} is out of range of sequence", start);
+      spdlog::error("start position {} is out of range, length = {}, strand = {}", start, this->seq.size(), forward_strain);
       throw std::out_of_range("start position is out of range of sequence");
     }
 
@@ -433,14 +438,17 @@ public:
   }
 
   auto add_corrected_fragment(Sequence<std::string> fragment) {
-    corrected_fragments.emplace_back(std::move(fragment));
-    // assembler.add_seq(std::move(fragment));
+    // corrected_fragments.emplace_back(std::move(fragment));
+    assembler.add_seq(std::move(fragment));
     // assembler.add_seq(fragment.seq, fragment.left_bound,
     //                   fragment.right_bound);
   }
 
   auto is_finished() const noexcept {
-    return finished_windows_cnt == windows.size();
+    if (windows.size() == 0) {
+      return false;
+    }
+    return finished_windows_cnt.load() == windows.size();
   }
 
   auto get_corrected_read() {
@@ -486,8 +494,9 @@ public:
   /* windows of this read */
   std::vector<Window> windows;
 
-  /* read id that overlap with this read */
+  /* overlap reads info with this read */
   std::vector<std::size_t> overlap_reads_id;
+  std::ranges::subrange<std::vector<Overlap>::iterator> overlap_range;
 
   /* finished windows counter */
   std::atomic_int finished_windows_cnt{0};
@@ -495,8 +504,11 @@ public:
   /* assembler of this read */
   ReadAssembler assembler;
 
-  /* flag for */
+  /* flag for assembled */
   bool is_assembled{false};
+
+  /* flag for need corrected */
+  bool need_corrected{true};
 
   // TODO: for debug, remove it later
   /**
