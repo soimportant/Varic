@@ -37,13 +37,18 @@ add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/submodules)
 # spoa
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/include/spoa)
 
-link_libraries(spdlog spoa::spoa ${Boost_LIBRARIES} biovoltron edlib OpenMP::OpenMP_C OpenMP::OpenMP_CXX tcmalloc profiler)
+link_libraries(spdlog spoa::spoa biovoltron edlib tcmalloc profiler)
 
 include_directories(${CMAKE_CURRENT_LIST_DIR}/include)
 
-add_compile_definitions(DATA_PATH="/mnt/ec/mammoth/yolkee/thesis/data"
-RESULT_PATH="/mnt/ec/mammoth/yolkee/thesis/result"
-TMP_PATH="/mnt/ec/ness/yolkee/thesis/tmp")
+add_compile_definitions(
+  DATA_PATH="/mnt/ec/mammoth/yolkee/thesis/data"
+  RESULT_PATH="/mnt/ec/mammoth/yolkee/thesis/result"
+  TMP_PATH="/mnt/ec/ness/yolkee/thesis/tmp")
+
+if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+  add_compile_definitions(DEBUG)
+endif()
 
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -Wall -Wextra")
 
@@ -54,8 +59,7 @@ if ("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang")
 endif()
 
 add_executable(main ${CMAKE_CURRENT_LIST_DIR}/src/main.cpp)
-# add_executable(eval ${CMAKE_CURRENT_LIST_DIR}/src/eval.cpp)
-# add_executable(eval2 ${CMAKE_CURRENT_LIST_DIR}/src/eval2.cpp)
+add_executable(fasta2msa ${CMAKE_CURRENT_LIST_DIR}/src/fasta2msa.cpp)
 add_executable(test ${CMAKE_CURRENT_LIST_DIR}/src/test.cpp)
 add_executable(maf2fa ${CMAKE_CURRENT_LIST_DIR}/src/maf2fa.cpp)
 

@@ -4,19 +4,21 @@
 #include <string_view>
 #include <type_traits>
 
-template<class T>
+template <class T>
 concept StringLike = std::is_convertible_v<T, std::string_view>;
 
-template<StringLike T = std::string_view>
+template <StringLike T = std::string_view>
 class Sequence {
-public:
-
+ public:
   Sequence() = default;
   Sequence(const std::size_t read_id, const std::size_t left_bound,
            const std::size_t right_bound, T seq, std::optional<T> qual,
            const bool forward_strain)
-      : read_id(read_id), left_bound(left_bound), right_bound(right_bound),
-        seq(std::move(seq)), qual(std::move(qual)),
+      : read_id(read_id),
+        left_bound(left_bound),
+        right_bound(right_bound),
+        seq(std::move(seq)),
+        qual(std::move(qual)),
         forward_strain(forward_strain) {}
 
   // delete copy constructor and copy assignment
@@ -27,9 +29,7 @@ public:
   Sequence(Sequence&&) = default;
   Sequence& operator=(Sequence&&) = default;
 
-  auto len() const noexcept -> std::size_t {
-    return seq.size();
-  }
+  auto len() const noexcept { return seq.size(); }
 
   ~Sequence() = default;
 
@@ -44,12 +44,11 @@ public:
   T seq;
 
   /**
-   * the quality of `seq`, if qual.has_value() == false, then the read is come
-   * from fasta file
+   * the quality of `seq`, the sequence doesn't have quality score if
+   * qual.has_value() == false
    */
   std::optional<T> qual;
 
   /* forward strain(true) or reverse strain(false) */
   bool forward_strain;
 };
-

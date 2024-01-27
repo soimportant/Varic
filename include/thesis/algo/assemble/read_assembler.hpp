@@ -247,7 +247,6 @@ public:
 
     auto kmer_size = std::ceil(std::log2(read_len) * 2.5);
     // TODO: adjust it by coverage of fragments or something else
-    auto fout = std::ofstream("/mnt/ec/ness/yolkee/thesis/tests/a.txt");
     for (std::size_t i = 0; i < param.MAX_ITERATIONS; ++i) {
       // spdlog::debug("Assemble: kmer_size = {}", kmer_size);
       auto failed = false;
@@ -255,8 +254,6 @@ public:
 
       switch (get_read_state(corrected_read)) {
       case State::ASSEMBLE_SUCCESS:
-
-        fout << corrected_read << '\n';
         return corrected_read;
       case State::ASSEMBLE_TOO_LONG:
       case State::ASSEMBLE_TOO_SHORT:

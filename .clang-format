@@ -5,5 +5,5 @@ DerivePointerAlignment: false
 PointerAlignment: Left
 SpaceAfterCStyleCast: true
 LambdaBodyIndentation: OuterScope
-BreakTemplateDeclarationsStyle: Yes
-IncludeBlocksStyle: Regroup
+AlwaysBreakTemplateDeclarations: Yes
+IncludeBlocks: Regroup

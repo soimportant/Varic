@@ -1,14 +1,14 @@
 #pragma once
 
+#include <edlib.h>
+#include <spdlog/spdlog.h>
+
 #include <atomic>
+#include <biovoltron/file_io/fasta.hpp>
 #include <concepts>
 #include <optional>
 #include <queue>
 #include <ranges>
-
-#include <biovoltron/file_io/fasta.hpp>
-#include <edlib.h>
-#include <spdlog/spdlog.h>
 
 #include "thesis/algo/assemble/read_assembler.hpp"
 #include "thesis/corrector/detail/overlap.hpp"
@@ -17,13 +17,41 @@
 
 namespace bio = biovoltron;
 
+/**
+ * @brief align overlap part between query read and target read, and return
+ * the cigar string
+ *
+ * @param q subsequence on query read
+ * @param t subsequence on target read
+ * @return bio::Cigar
+ */
+auto align(const std::string_view q, const std::string_view t) {
+  auto aln = edlibAlign(
+      q.data(), q.size(), t.data(), t.size(),
+      edlibNewAlignConfig(-1, EDLIB_MODE_NW, EDLIB_TASK_PATH, nullptr, 0));
+
+  if (aln.status != EDLIB_STATUS_OK) {
+    spdlog::error(
+        "Error when align overlap part of query read and target read");
+    exit(EXIT_FAILURE);
+  }
+  /* there's no *X* in cigar string when using `EDLIB_CIGAR_STANDARD */
+  /* if you wanna contain mismatch info, please use `EDLIB_CIGAR_EXTENDED */
+  auto* s = edlibAlignmentToCigar(aln.alignment, aln.alignmentLength,
+                                  EDLIB_CIGAR_STANDARD);
+  auto cigar = bio::Cigar(s);
+  std::free(s);
+  edlibFreeAlignResult(aln);
+  return cigar;
+}
+
 template <class R>
   requires std::derived_from<R, bio::FastaRecord<R::encoded>>
 class ReadWrapper : public R {
-public:
+ public:
   /* disable copy constructor and copy assignment */
-  ReadWrapper(const ReadWrapper &) = delete;
-  ReadWrapper &operator=(const ReadWrapper &) = delete;
+  ReadWrapper(const ReadWrapper&) = delete;
+  ReadWrapper& operator=(const ReadWrapper&) = delete;
 
   /* move constructor */
   ReadWrapper(ReadWrapper&& rhs) : assembler(this->seq.size()) {
@@ -39,12 +67,12 @@ public:
     this->need_corrected = rhs.need_corrected;
     this->overlap_range = std::move(rhs.overlap_range);
     this->assembler = std::move(rhs.assembler);
-    this->is_assembled = rhs.is_assembled;
-    this->corrected_fragments = std::move(rhs.corrected_fragments);
+    this->state = rhs.state.load();
+    this->fragments = std::move(rhs.fragments);
   }
 
   /* move assignment */
-  ReadWrapper &operator=(ReadWrapper&& rhs) {
+  ReadWrapper& operator=(ReadWrapper&& rhs) {
     this->id = rhs.id;
     this->name = std::move(rhs.name);
     this->seq = std::move(rhs.seq);
@@ -57,14 +85,59 @@ public:
     this->need_corrected = rhs.need_corrected;
     this->overlap_range = std::move(rhs.overlap_range);
     this->assembler = std::move(rhs.assembler);
-    this->is_assembled = rhs.is_assembled;
-    this->corrected_fragments = std::move(rhs.corrected_fragments);
+    this->state = rhs.state.load();
+    this->fragments = std::move(rhs.fragments);
     return *this;
   }
 
-  ReadWrapper(R &&r) : R(std::move(r)), assembler(this->seq.size()){};
+  ReadWrapper(R&& r) : R(std::move(r)), assembler(this->seq.size()){};
 
   ReadWrapper() : assembler(0) {}
+
+  enum struct State {
+    UNCORRECTED,
+    BUILD_WINDOW,
+    WAIT_FOR_ASSEMBLE,
+    ASSEMBLING,
+    ASSEMBLED,
+  };
+
+  /**
+   * @brief Initialize boundaries and backbone sequence for each window.
+   * @details The window length will be equally divided by the length of read,
+   * and the max length of window is `max_window_len`. Then extend the window by
+   * `window_extend_len` on both side.
+   *
+   * @param max_window_len max length of window
+   * @param window_extend_len extend length of window
+   * @return void
+   */
+  auto init_windows(const std::size_t max_window_len,
+                    const std::size_t window_extend_len) {
+    const auto window_sz =
+        len() / max_window_len + (len() % max_window_len != 0);
+    const auto window_len = len() / window_sz + (len() % window_sz != 0);
+
+    for (auto pos = 0ul, w_idx = 0ul; pos < len(); pos += window_len, w_idx++) {
+      auto window =
+          Window{this->id, w_idx, pos, std::min(len(), pos + window_len)};
+      window.extend(window_extend_len, len());
+
+      window.backbone.read_id = this->id;
+      window.backbone.left_bound = window.start;
+      window.backbone.right_bound = window.end;
+      std::tie(window.backbone.seq, window.backbone.qual) =
+          subview(true, window.start, window.end);
+      window.backbone.forward_strain = true;
+
+      windows.emplace_back(std::move(window));
+    }
+    fragment_cnt[this->id] = windows.size();
+    index_range[this->id] = get_index_range(windows.size());
+    indexes[this->id] = index_range[this->id].first;
+    total_fragments += windows.size();
+    state = State::BUILD_WINDOW;
+  }
 
   /**
    * Retrieves a subrange of windows within a specified range.
@@ -87,34 +160,6 @@ public:
   }
 
   /**
-   * @brief align overlap part between query read and target read, and return
-   * the cigar string
-   *
-   * @param q subsequence on query read
-   * @param t subsequence on target read
-   * @return bio::Cigar
-   */
-  auto align(const std::string_view q, const std::string_view t) {
-    auto aln = edlibAlign(
-        q.data(), q.size(), t.data(), t.size(),
-        edlibNewAlignConfig(-1, EDLIB_MODE_NW, EDLIB_TASK_PATH, nullptr, 0));
-
-    if (aln.status != EDLIB_STATUS_OK) {
-      spdlog::error(
-          "Error when align overlap part of query read and target read");
-      exit(EXIT_FAILURE);
-    }
-    /* there's no *X* in cigar string when using `EDLIB_CIGAR_STANDARD */
-    /* if you wanna contain mismatch info, please use `EDLIB_CIGAR_EXTENDED */
-    auto *s = edlibAlignmentToCigar(aln.alignment, aln.alignmentLength,
-                                    EDLIB_CIGAR_STANDARD);
-    auto cigar = bio::Cigar(s);
-    std::free(s);
-    edlibFreeAlignResult(aln);
-    return cigar;
-  }
-
-  /**
    * @brief Find breakpoints from a cigar string within a window range.
    *
    * This function takes a cigar string, a window range, and an overlap as
@@ -130,9 +175,9 @@ public:
    *         target read for each window.
    */
   template <std::ranges::range T>
-  auto find_breakpoints_from_cigar(const bio::Cigar &cigar,
+  auto find_breakpoints_from_cigar(const bio::Cigar& cigar,
                                    const T window_range,
-                                   const Overlap &overlap) {
+                                   const Overlap& overlap) {
     auto window_cnt = std::ranges::size(window_range);
     auto [q_start, q_end] = std::make_pair(overlap.q_idx_L, overlap.q_idx_R);
     auto [t_start, t_end] = std::make_pair(overlap.t_idx_L, overlap.t_idx_R);
@@ -198,8 +243,7 @@ public:
       }
     };
 
-    auto w_idx = 0u;
-    for (const auto &[len, op] : cigar) {
+    for (auto w_idx = 0u; const auto& [len, op] : cigar) {
       if (op == 'M') {
         while (!wait_for_first_match.empty()) {
           auto idx = wait_for_first_match.front();
@@ -265,39 +309,6 @@ public:
   }
 
   /**
-   * @brief Initialize boundaries and backbone sequence for each window.
-   * @details The window length will be equally divided by the length of read,
-   * and the max length of window is `max_window_len`. Then extend the window by
-   * `window_extend_len` on both side.
-   *
-   * @param max_window_len max length of window
-   * @param window_extend_len extend length of window
-   * @return void
-   */
-  auto init_windows(const std::size_t max_window_len,
-                    const std::size_t window_extend_len) {
-
-    const auto window_sz =
-        len() / max_window_len + (len() % max_window_len != 0);
-    const auto window_len = len() / window_sz + (len() % window_sz != 0);
-
-    for (auto pos = 0ul, w_idx = 0ul; pos < len(); pos += window_len, w_idx++) {
-      auto window =
-          Window{this->id, w_idx, pos, std::min(len(), pos + window_len)};
-      window.extend(window_extend_len, len());
-
-      window.backbone.read_id = this->id;
-      window.backbone.left_bound = window.start;
-      window.backbone.right_bound = window.end;
-      std::tie(window.backbone.seq, window.backbone.qual) =
-          subview(true, window.start, window.end);
-      window.backbone.forward_strain = true;
-
-      windows.emplace_back(std::move(window));
-    }
-  }
-
-  /**
    * @brief Adds an overlap into the window.
    *
    * This function takes an overlap and a read wrapper as input and adds the
@@ -309,53 +320,99 @@ public:
    * and adds the sequence into each window according to the breakpoints.
    *
    * @param overlap The overlap to be added into the window.
-   * @param t_read The read wrapper containing the sequence to be added.
+   * @param t_read The read wrapper containing the sequence info to be added.
    */
-  auto add_overlap_into_window(const Overlap &overlap,
-                               const ReadWrapper<R> &t_read) {
-    auto forward_strain = overlap.forward_strain;
+  auto add_overlap_into_window(const Overlap& overlap,
+                               const ReadWrapper<R>& t_read) {
+    const auto forward_strain = overlap.forward_strain;
 
-    auto [q_start, q_end] = std::make_pair(overlap.q_idx_L, overlap.q_idx_R);
-    auto [t_start, t_end] = std::make_pair(overlap.t_idx_L, overlap.t_idx_R);
-    auto [q_seq_view, q_qual_view] = subview(true, q_start, q_end);
-    auto [t_seq_view, t_qual_view] =
+    const auto [q_start, q_end] =
+        std::make_pair(overlap.q_idx_L, overlap.q_idx_R);
+    const auto [t_start, t_end] =
+        std::make_pair(overlap.t_idx_L, overlap.t_idx_R);
+    const auto [q_seq_view, q_qual_view] = subview(true, q_start, q_end);
+    const auto [t_seq_view, t_qual_view] =
         t_read.subview(forward_strain, t_start, t_end);
 
-    auto window_range = get_window_range(q_start, q_end);
+    const auto window_range = get_window_range(q_start, q_end);
     auto window_idx = window_range.begin() - windows.begin();
 
     auto cigar = align(q_seq_view, t_seq_view);
     auto [q_breakpoints, t_breakpoints] =
         find_breakpoints_from_cigar(cigar, window_range, overlap);
-    const auto window_cnt = std::ranges::size(window_range);
     assert(q_breakpoints.size() == t_breakpoints.size() &&
            "size not equal between q_breakpoints and t_breakpoints");
 
+    const auto window_cnt = std::ranges::size(window_range);
     for (auto i = 0u; i < window_cnt; i++, window_idx++) {
-      auto &window = windows[window_idx];
-      auto [t_window_st, t_window_ed] = t_breakpoints[i];
+      auto& window = windows[window_idx];
+      const auto [t_window_st, t_window_ed] = t_breakpoints[i];
       if (t_window_st >= t_end) {
         continue;
       }
       assert(t_window_ed >= t_window_st &&
              "t_window_ed < t_window_st, wrong boundary");
-      auto [t_window_seq, t_window_qual] =
+      const auto [t_window_seq, t_window_qual] =
           t_read.subview(forward_strain, t_window_st, t_window_ed);
 
       // when racon add sequence into window, it will store the pos of first
       // match, then sort the overlap_seqs according the pos of first match
       window.add_sequence(
           Sequence<>{
-              overlap.t_id,  // read_id
-              t_window_st,   // left_bound
-              t_window_ed,   // right_bound
-              t_window_seq,  // seq
-              t_window_qual, // qual
-              forward_strain // forward_strain
+              overlap.t_id,   // read_id
+              t_window_st,    // left_bound
+              t_window_ed,    // right_bound
+              t_window_seq,   // seq
+              t_window_qual,  // qual
+              forward_strain  // forward_strain
           },
           q_breakpoints[i]);
     }
+    fragment_cnt[t_read.id] += window_cnt;
   }
+
+  /**
+   * @brief Increases the count of finished windows.
+   *
+   * @details Each time this function is called, the count of finished windows
+   * will be increased by one. If the count of finished windows equals the total
+   * number of windows, the status will be set to WAIT_TO_ASSEMBLE.
+   */
+  auto add_finished_window() noexcept {
+    finished_windows_cnt++;
+    if (finished_windows_cnt == windows.size()) {
+      auto expected = State::BUILD_WINDOW;
+      state.compare_exchange_strong(expected, State::WAIT_FOR_ASSEMBLE);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * @brief Returns whether the read is ready to assemble.
+   *
+   * @return true if the read is ready to assemble, false otherwise.
+   */
+  auto ready_to_assemble() noexcept {
+    return state == State::WAIT_FOR_ASSEMBLE || state == State::ASSEMBLING;
+  }
+
+  /**
+   * Acquires the assembling state.
+   * This function atomically compares the current state with
+   * State::WAIT_FOR_ASSEMBLE, and if they are equal, it updates the state to
+   * State::ASSEMBLING and returns true. If the current state is not equal to
+   * State::WAIT_FOR_ASSEMBLE, it returns false.
+   *
+   * @return true if the state was successfully updated to State::ASSEMBLING,
+   * false otherwise.
+   */
+  auto acquire_assembling() {
+    auto expected = State::WAIT_FOR_ASSEMBLE;
+    return state.compare_exchange_strong(expected, State::ASSEMBLING);
+  }
+
+  auto is_assembled() const noexcept { return state == State::ASSEMBLED; }
 
   /**
    * @brief Creates the reverse complement sequence and quality scores (if
@@ -366,19 +423,12 @@ public:
    */
   auto create_rc() noexcept {
     if (rc_seq.size() != 0) {
-      return true;
+      return;
     }
-    try {
-      rc_seq = bio::Codec::rev_comp(this->seq);
-      if constexpr (std::same_as<R, bio::FastqRecord<R::encoded>>) {
-        rev_qual = std::string(this->qual.rbegin(), this->qual.rend());
-      }
-    } catch (std::bad_alloc &e) {
-      spdlog::error(
-          "bad_alloc caught when creating reverse complement sequence");
-      return false;
+    rc_seq = bio::Codec::rev_comp(this->seq);
+    if constexpr (std::same_as<R, bio::FastqRecord<R::encoded>>) {
+      rev_qual = std::string(this->qual.rbegin(), this->qual.rend());
     }
-    return true;
   }
 
   /**
@@ -407,7 +457,7 @@ public:
    * position.
    * @throws std::out_of_range If the start position is out of range of the
    * sequence.
-   */ 
+   */
   auto subview(bool forward_strain, const std::size_t start,
                const std::size_t end) const {
     if (start > end) {
@@ -417,7 +467,9 @@ public:
     }
 
     if (start > this->seq.size()) {
-      spdlog::error("start position {} is out of range, length = {}, strand = {}", start, this->seq.size(), forward_strain);
+      spdlog::error(
+          "start position {} is out of range, length = {}, strand = {}", start,
+          this->seq.size(), forward_strain);
       throw std::out_of_range("start position is out of range of sequence");
     }
 
@@ -437,26 +489,54 @@ public:
     return std::make_pair(seq_view, qual_view);
   }
 
+  auto get_fragment_cnt(std::size_t id) noexcept {
+    if (!fragment_cnt.contains(id)) {
+      spdlog::warn("read {} not contains fragments from read {}", this->id, id);
+      return 0ul;
+    }
+    return fragment_cnt[id];
+  }
+
+  auto get_index_range(std::size_t cnt) noexcept {
+    auto expected = total_fragments.load();
+    auto nxt_value = expected + cnt;
+    while (!total_fragments.compare_exchange_weak(expected, nxt_value,
+                                                std::memory_order_acq_rel)) {
+      nxt_value = expected + cnt;
+    }
+    return std::make_pair(expected, nxt_value);
+  }
+
+  auto get_index(std::size_t id) noexcept {
+    if (!indexes.contains(id)) {
+      spdlog::warn("read {} not contains fragments from read {}", this->id, id);
+      return 0ul;
+    }
+    return indexes[id].fetch_add(1, std::memory_order_acq_rel);
+  }
+
+  auto set_fragments_size() noexcept {
+    fragments.resize(total_fragments.load());
+  }
+
+  auto set_corrected_fragment(std::size_t idx, Sequence<std::string> fragment) {
+    assert(idx < fragments.size() && "idx out of range");
+    fragments[idx] = std::move(fragment);
+  }
+
   auto add_corrected_fragment(Sequence<std::string> fragment) {
-    // corrected_fragments.emplace_back(std::move(fragment));
-    assembler.add_seq(std::move(fragment));
+    fragments.emplace_back(std::move(fragment));
+    // assembler.add_seq(std::move(fragment));
     // assembler.add_seq(fragment.seq, fragment.left_bound,
     //                   fragment.right_bound);
   }
 
-  auto is_finished() const noexcept {
-    if (windows.size() == 0) {
-      return false;
+  auto assemble_corrected_seq() {
+    for (auto& f : fragments) {
+      assembler.add_seq(std::move(f));
     }
-    return finished_windows_cnt.load() == windows.size();
-  }
-
-  auto get_corrected_read() {
-    auto corrected_read = assembler.assemble();
-    is_assembled = true;
-    bio::FastaRecord<false> read;
-    read.seq = std::move(corrected_read);
-    return read;
+    this->corrected_seq = assembler.assemble();
+    state = State::ASSEMBLED;
   }
 
   auto clear() {
@@ -464,18 +544,18 @@ public:
     if (rev_qual.has_value()) {
       rev_qual->clear();
     }
-    for (auto &w : windows) {
+    for (auto& w : windows) {
       w.clear();
     }
     windows.clear();
     assembler.clear();
   }
 
-  auto operator<=>(const ReadWrapper &rhs) const {
+  auto operator<=>(const ReadWrapper& rhs) const {
     return this->name <=> rhs.name;
   }
 
-private:
+ private:
   // TODO: coverage -> segment tree like data structure
   // ? we may add a data structure here for recording the coverage covered
   // ? by corrected_fragments, if the coverage is enough, we can assemble
@@ -487,33 +567,39 @@ private:
   /* reverse quality sequence */
   std::optional<std::string> rev_qual;
 
-public:
+ public:
   /* read id */
   std::size_t id;
 
-  /* windows of this read */
-  std::vector<Window> windows;
+  /* flag for need corrected */
+  bool need_corrected{true};
+
+  std::atomic<State> state{State::UNCORRECTED};
 
   /* overlap reads info with this read */
   std::vector<std::size_t> overlap_reads_id;
   std::ranges::subrange<std::vector<Overlap>::iterator> overlap_range;
 
-  /* finished windows counter */
+  /* windows of this read */
+  std::vector<Window> windows;
+
+  /* counter of window that finished generating fragments */
   std::atomic_int finished_windows_cnt{0};
 
-  /* assembler of this read */
-  ReadAssembler assembler;
+  /* counter of fragments of other reads that used to correct this read */
+  std::map<std::size_t, std::size_t> fragment_cnt;
+  std::map<std::size_t, std::pair<std::size_t, std::size_t>> index_range;
+  std::map<std::size_t, std::atomic<std::size_t>> indexes;
 
-  /* flag for assembled */
-  bool is_assembled{false};
-
-  /* flag for need corrected */
-  bool need_corrected{true};
-
-  // TODO: for debug, remove it later
   /**
    * corrected sequence fragments from windows of others read, may further
    * assemble to correct version of this read
    */
-  std::vector<Sequence<std::string>> corrected_fragments;
+  std::vector<Sequence<std::string>> fragments;
+  std::atomic_uint32_t total_fragments{0};
+
+  /* assembler of this read */
+  ReadAssembler assembler;
+
+  std::string corrected_seq;
 };

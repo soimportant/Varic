@@ -1,6 +1,7 @@
 #pragma once
 
 #include <edlib.h>
+#include <gperftools/heap-profiler.h>
 
 #include <algorithm>
 #include <atomic>
@@ -72,10 +73,18 @@ class FragmentedReadCorrector {
    * @param overlap_range
    * @return std::vector<Window>
    */
-  auto make_windows_for_one_read(Read& raw_read) {
-    raw_read.init_windows(param.max_window_len, param.window_extend_len);
-    for (const auto& overlap : raw_read.overlap_range) {
-      raw_read.add_overlap_into_window(overlap, reads[overlap.t_id]);
+  auto make_windows_for_one_read(Read& read) {
+    read.init_windows(param.max_window_len, param.window_extend_len);
+    for (const auto& overlap : read.overlap_range) {
+      if (reads[overlap.t_id].need_corrected) {
+        read.add_overlap_into_window(overlap, reads[overlap.t_id]);
+      }
+    }
+    for (auto& t_id : read.overlap_reads_id) {
+      auto fragments_cnt = read.get_fragment_cnt(t_id);
+      auto index_range = reads[t_id].get_index_range(fragments_cnt);
+      read.index_range[t_id] = index_range;
+      read.indexes[t_id] = index_range.first;
     }
   }
 
@@ -83,14 +92,14 @@ class FragmentedReadCorrector {
     auto total_windows = 0ul;
     auto total_seqs = 0ul;
     auto total_seqs_lens = 0ul;
-    // const int take_reads = reads.size();
-    const int take_reads = 20;
+    const int take_reads = reads.size();
+    // const int take_reads = 20;
 
     spdlog::debug("Taking {} reads now", take_reads);
     spdlog::info("Making windows for each reads...");
 
 #pragma omp parallel for num_threads(threads) \
-    reduction(+ : total_windows, total_seqs)
+    reduction(+ : total_windows, total_seqs, total_seqs_lens)
     for (int i = 0; i < take_reads; i++) {
       auto& read = reads[i];
       // for (auto& read : reads) {
@@ -103,7 +112,11 @@ class FragmentedReadCorrector {
         }
       }
     }
-    spdlog::info("building window down");
+    for (int i = 0; i < take_reads; i++) {
+      reads[i].set_fragments_size();
+    }
+
+    spdlog::info("building window down, total = {}", total_windows);
     spdlog::debug("average windows in a read = {:.2f}",
                   static_cast<double>(total_windows) / take_reads);
     spdlog::debug("average sequence inside a window = {:.2f}",
@@ -122,62 +135,100 @@ class FragmentedReadCorrector {
     assert(std::ranges::is_sorted(overlaps, {}, &Overlap::q_id) &&
            "overlaps should be sorted by query id");
 
-    // auto target = "11_8325";
-    // spdlog::debug("overlap_range.size() = {}",
-    // get_overlap_range(target).size());
-
-    // auto has_pushed_read_cnt = std::atomic_int{0};
     auto cv = std::condition_variable{};
+    auto global_aln_engines =
+        std::vector<std::unique_ptr<spoa::AlignmentEngine>>(threads);
+    auto local_aln_engines =
+        std::vector<std::unique_ptr<spoa::AlignmentEngine>>(threads);
+    for (auto i = 0u; i < threads; i++) {
+      global_aln_engines[i] = get_global_alignment_engine(param.max_window_len);
+      local_aln_engines[i] = get_local_alignment_engine(param.max_window_len);
+    }
 
-    std::function<void(Read&)> assemble_and_write = [&](Read& raw_read) {
-      // spdlog::debug("Assemble read {}, len = {}", raw_read.name,
-      // raw_read.len());
+    auto assemble_and_write = [&](Read& read) {
       // TODO: if coverage is enough, then we can assemble the read
       // remember that if we don't build the graph for this read, then there may
       // have other read that doesn't have enough data for building graph, so we
       // may need other mechanism to build the graph for this read.
-      auto ready = true;
-      if (!raw_read.is_finished()) {
-        ready = false;
+
+      if (!read.ready_to_assemble()) {
+        spdlog::debug("Read {} is not ready to assemble", read.name);
+        return false;
       }
-      for (auto t_id : raw_read.overlap_reads_id) {
-        if (!reads[t_id].is_finished()) {
-          ready = false;
+      for (auto t_id : read.overlap_reads_id) {
+        if (!reads[t_id].ready_to_assemble() && !reads[t_id].is_assembled()) {
+          spdlog::debug("Read {}'s overlap read {} is not ready to assemble",
+                        read.name, reads[t_id].name);
+          return false;
         }
       }
-      if (ready) {
-        spdlog::debug(
-            "Read {} start assemble, overlap.size() = {}, window_size = {}",
-            raw_read.name, raw_read.overlap_reads_id.size(),
-            raw_read.windows.size());
+      if (!read.acquire_assembling()) {
+        spdlog::debug("Read {} acquire assembling failed", read.name);
+        return false;
+      }
 
-        auto corrected_read = raw_read.get_corrected_read();
-        corrected_read.name = raw_read.name;
-        raw_read.clear();
-        std::scoped_lock lock(corrected_reads_mutex);
-        corrected_reads.emplace_back(std::move(corrected_read));
-      } else {
-        threadpool.submit(assemble_and_write, std::ref(raw_read));
+      read.assemble_corrected_seq();
+      static std::atomic_int cnt = 0;
+      if (cnt % 100 == 0) {
+        spdlog::debug("cnt = {}, all = {}", cnt, filtered_raw_reads_size);
       }
-      if (corrected_reads.size() == filtered_raw_reads_size) {
-        cv.notify_one();
-      }
+      cnt++;
+      cv.notify_all();
+      return true;
     };
 
     auto window_pipeline = [&](Window& window) {
-      auto tid = threadpool.get_worker_id();
-      thread_local auto engine =
-          get_global_alignment_engine(param.max_window_len);
-      window.build_variation_graph(engine);
-      auto corrected_fragments = window.get_corrected_fragments(engine);
-      for (auto& seq : corrected_fragments) {
-        auto lock = std::scoped_lock(mutexes[seq.read_id]);
-        reads[seq.read_id].add_corrected_fragment(std::move(seq));
+      // TODO: check read is assembled or not, is yes, then skip this window
+
+      auto read_id = window.read_id;
+      auto thread_id = threadpool.get_worker_id();
+      auto& global_aln_engine = global_aln_engines[thread_id];
+      auto& local_aln_engine = local_aln_engines[thread_id];
+      auto corrected_sequences =
+          window.get_corrected_sequences(global_aln_engine, local_aln_engine);
+      // window.build_variation_graph(engine);
+      // {
+      //   auto target_read = "01_10001";
+      //   auto found = false;
+      //   for (auto& seq : corrected_fragments) {
+      //     if (seq.read_id == name2id[target_read]) {
+      //       found = true;
+      //     }
+      //   }
+      //   if (found) {
+      //     auto path =
+      //         fs::path(fmt::format("{}/corrected_fragments/{}_{}.txt",
+      //         TMP_PATH,
+      //                              id2name[window.read_id], window.idx));
+      //     auto fout = std::ofstream(path);
+      //     for (auto& seq : corrected_fragments) {
+      //       auto fasta = bio::FastaRecord<false>{};
+      //       fasta.name = id2name[seq.read_id];
+      //       fasta.seq = seq.seq;
+      //       fout << fasta << '\n';
+      //     }
+      //     window.print_graph(path.replace_extension(".dot"),
+      //     name2id[target_read]);
+      //   }
+      // }
+      for (auto& seq : corrected_sequences) {
+        // auto lock = std::scoped_lock(mutexes[seq.read_id]);
+        auto index = reads[read_id].get_index(seq.read_id);
+        reads[seq.read_id].set_corrected_fragment(index, std::move(seq));
       }
+      reads[read_id].add_finished_window();
       window.clear();
-      reads[window.read_id].finished_windows_cnt += 1;
+      // if (reads[window.read_id].ready_to_assemble()) {
+      //   // all windows in this read has been processed, we can check there's
+      //   // any read or itself need to be assembled
+      //   threadpool.submit(assemble_and_write,
+      //   std::ref(reads[window.read_id])); for (const auto& t_id :
+      //   reads[window.read_id].overlap_reads_id) {
+      //     threadpool.submit(assemble_and_write, std::ref(reads[t_id]));
+      //   }
+      // }
       {
-        static std::atomic_int cnt = 0;
+        static int cnt = 0;
         if (cnt % 10000 == 0) {
           spdlog::debug("cnt = {}", cnt);
         }
@@ -191,35 +242,109 @@ class FragmentedReadCorrector {
       for (auto& w : windows) {
         auto [_, res] = threadpool.submit(window_pipeline, std::ref(w));
       }
-      threadpool.submit(assemble_and_write, std::ref(read));
+      // threadpool.submit(assemble_and_write, std::ref(read));
+
+      if (read.id == name2id["01_10001"]) {
+        spdlog::debug("read {} has {} windows", read.name, read.windows.size());
+        for (auto i = 0u; i < read.windows.size(); i++) {
+          spdlog::debug("window {}({}, {}) has {} overlap seqs", i,
+                        read.windows[i].start, read.windows[i].end,
+                        read.windows[i].overlap_seqs.size());
+        }
+      }
     };
 
-    spdlog::debug("Pushed all read into pipeline...");
-    auto order = std::vector<std::size_t>(reads.size());
-    std::iota(order.begin(), order.end(), 0);
-    std::sort(std::execution::par, order.begin(), order.end(), [&](int a, int b) {
-      return reads[a].overlap_range.size() > reads[b].overlap_range.size();
-    });
+    // spdlog::debug("Pushed all read into pipeline...");
+    // // TODO fixed the order
+    // auto order = std::vector<std::size_t>(reads.size());
+    // std::iota(order.begin(), order.end(), 0);
+    // std::sort(order.begin(), order.end(), [&](int a, int b) {
+    //   return reads[a].overlap_range.size() < reads[b].overlap_range.size();
+    // });
 
-    for (auto& x : order) {
-      auto& read = reads[x];
-      if (read.need_corrected) {
-        auto [_, res] = threadpool.submit(read_pipeline, std::ref(read));
-      }
-    }
-    spdlog::debug("Pushed read pipeline done");
+    // for (auto& x : order) {
+    //   auto& read = reads[x];
+    //   if (read.need_corrected) {
+    //     auto [_, res] = threadpool.submit(read_pipeline, std::ref(read));
+    //   }
+    // }
+    // spdlog::debug("Pushed read pipeline done");
 
     {
-      spdlog::debug("Waiting all reads been assembled");
-      auto mutex = std::mutex{};
-      std::unique_lock lock(mutex);
-      cv.wait(lock, [&]() {
-        return corrected_reads.size() == filtered_raw_reads_size;
-      });
-      spdlog::debug("Done");
+      make_windows_for_all_read();
+      spdlog::info("Build windows for all reads");
+
+      auto futures = std::vector<std::future<void>>{};
+      for (auto i = 0u; i < reads.size(); i++) {
+        auto& read = reads[i];
+        for (auto& w : read.windows) {
+          auto [_, res] = threadpool.submit(window_pipeline, std::ref(w));
+          futures.emplace_back(std::move(res));
+        }
+      }
+
+      for (auto& res : futures) {
+        res.get();
+      }
+      auto total_windows = 0ul;
+      for (auto& read : reads) {
+        total_windows += read.windows.size();
+      }
+      spdlog::info("Build windows done: total = {}", total_windows);
     }
 
-    std::exit(0);
+    {
+      spdlog::debug("check all window is ready for assembled");
+      for (auto& read : reads) {
+        if (read.need_corrected && !read.ready_to_assemble()) {
+          spdlog::debug("read {} is not ready to assemble", read.name);
+        }
+      }
+      for (auto& read : reads) {
+        for (auto& t_id : read.overlap_reads_id) {
+          if (!reads[t_id].ready_to_assemble()) {
+            spdlog::debug("Read {} is not ready to assemble: {}",
+                          reads[t_id].name, reads[t_id].need_corrected);
+          }
+        }
+      }
+    }
+
+    {
+      spdlog::info("Assembling all reads");
+      auto futures = std::vector<std::future<bool>>{};
+      for (auto i = 0u; i < reads.size(); i++) {
+        auto& read = reads[i];
+        if (read.need_corrected && read.ready_to_assemble()) {
+          auto [_, res] = threadpool.submit(assemble_and_write, std::ref(read));
+          futures.emplace_back(std::move(res));
+        }
+      }
+      for (auto& res : futures) {
+        assert(res.get());
+      }
+    }
+
+    // threadpool.join();
+    // spdlog::debug("After join, corrected_reads.size() = {}",
+    // corrected_reads.size());
+
+    // {
+    //   spdlog::debug("Waiting all reads been assembled");
+    //   auto mutex = std::mutex{};
+    //   std::unique_lock lock(mutex);
+    //   cv.wait(lock, [&]() {
+    //     spdlog::debug("cv got notified, corrected_reads.size() = {}",
+    //     corrected_reads.size()); return corrected_reads.size() ==
+    //     filtered_raw_reads_size;
+    //   });
+    //   spdlog::debug("Done");
+    // }
+    // TODO: check all read been assembled
+
+    // Do this check for there are some reads that are not assembled
+
+    // std::exit(0);
 
     // std::vector<std::shared_ptr<spoa::AlignmentEngine>>
     //     global_alignment_engines(threads);
@@ -282,26 +407,24 @@ class FragmentedReadCorrector {
     //   }
     // }
 
-    spdlog::debug("Start assemble reads");
     std::vector<bio::FastaRecord<false>> corrected_reads;
     auto fout = std::ofstream(TMP_PATH "/wrong2.txt");
 
-    // #pragma omp parallel for num_threads(threads)
-    //     for (auto &read : reads) {
-    //       // spdlog::debug("Assemble read {}, len = {}", id2name[read.id],
-    //       // read.len());
-    //       auto corrected_read = read.get_corrected_read();
-    //       corrected_read.name = id2name[read.id];
-
-    //       #pragma omp critical
-    //       if (corrected_read.seq.size() != 0) {
-    //         corrected_reads.emplace_back(std::move(corrected_read));
-    //         if (corrected_reads.size() % 100 == 0) {
-    //           spdlog::debug("Corrected {} reads", corrected_reads.size());
-    //         }
-    //       }
-    //     }
-
+#pragma omp parallel for num_threads(threads)
+    for (auto& read : reads) {
+      // spdlog::debug("Assemble read {}, len = {}", id2name[read.id],
+      // read.len());
+      auto corrected_read = bio::FastaRecord<false>{
+          .name = read.name,
+          .seq = std::move(read.corrected_seq),
+      };
+#pragma omp critical
+      if (corrected_read.seq.size() != 0) {
+        corrected_reads.emplace_back(std::move(corrected_read));
+      }
+    }
+    spdlog::debug("Filtered reads = {}", reads.size());
+    spdlog::debug("corrected_reads.size() = {}", corrected_reads.size());
     return corrected_reads;
 
     // fs::remove_all("/mnt/ec/ness/yolkee/thesis/tests/fragments");
@@ -524,30 +647,30 @@ class FragmentedReadCorrector {
       if (r.seq.size() < param.min_read_length) {
         return false;
       }
-      if (r.overlap_range.size() == 0) {
-        return false;
-      }
       return true;
     };
 
     reads.resize(raw_reads.size());
-
 #pragma omp parallel for
     for (auto& r : raw_reads) {
       auto read = Read(std::move(r));
       read.id = name2id[read.name];
-      read.overlap_range = get_overlap_range(read.name);
       read.need_corrected = valid_read(read);
-      for (const auto& overlap : read.overlap_range) {
-        read.overlap_reads_id.emplace_back(overlap.t_id);
-        if (!overlap.forward_strain) {
-          read.create_rc();
-          assert(read.create_rc());
-        }
-      }
       reads[read.id] = std::move(read);
     }
 
+#pragma omp parallel for
+    for (auto& read : reads) {
+      read.overlap_range = get_overlap_range(read.name);
+      for (const auto& overlap : read.overlap_range) {
+        if (reads[overlap.t_id].need_corrected) {
+          read.overlap_reads_id.emplace_back(overlap.t_id);
+        }
+        if (!overlap.forward_strain) {
+          read.create_rc();
+        }
+      }
+    }
     filtered_raw_reads_size =
         std::ranges::count_if(reads, &Read::need_corrected);
     assert(reads.size() == raw_reads.size());
@@ -567,13 +690,11 @@ class FragmentedReadCorrector {
     // and why it is so low.
     // const auto min_overlap_identity = 0.7l;
     auto valid_overlap = [&](const bio::PafRecord& paf) {
-      auto valid_read = [&](const std::string_view name) {
+      auto valid_read = [&](const std::string& name) {
         return name2id.contains(name);
       };
-      if (!valid_read(paf.q_name) || !valid_read(paf.t_name)) {
-        return false;
-      }
-      if (paf.q_name == paf.t_name) {
+      if (!valid_read(paf.q_name) || !valid_read(paf.t_name) ||
+          paf.q_name == paf.t_name) {
         return false;
       }
       // if (paf.aln_len < param.min_overlap_length) {
@@ -655,17 +776,21 @@ class FragmentedReadCorrector {
                   std::vector<bio::PafRecord>& overlaps) {
     unfiltered_raw_read_size = raw_reads.size();
     unfiltered_overlap_size = overlaps.size();
-
+    mutexes = std::vector<std::mutex>(raw_reads.size());
     /* transform read name to id */
     for (auto& read : raw_reads) {
       auto id = name2id.size();
       name2id[read.name] = id;
       id2name[id] = read.name;
     }
-
     overlap_preprocess(overlaps);
     read_preprocess(raw_reads);
-    mutexes = std::vector<std::mutex>(reads.size());
+
+    for (auto& read : reads) {
+      for (auto overlap_id : read.overlap_reads_id) {
+        assert(reads[overlap_id].need_corrected);
+      }
+    }
   }
 
   auto print_info() {
@@ -687,9 +812,9 @@ class FragmentedReadCorrector {
       const std::string& platform,
       const int thread_num = std::thread::hardware_concurrency(),
       bool debug = false)
-      : platform(platform),
-        threads(thread_num),
+      : threads(thread_num),
         threadpool(bio::make_threadpool(this->threads)),
+        platform(platform),
         debug(debug) {
     preprocess(raw_reads, overlaps);
     print_info();
@@ -724,7 +849,6 @@ class FragmentedReadCorrector {
   // TODO: should be enum class
   std::string platform;
 
-  std::vector<bio::FastaRecord<false>> corrected_reads;
   std::mutex corrected_reads_mutex;
 
   /* debug flag */

@@ -10,7 +10,7 @@ include/spoa
 kevin
 tools
 results
-tests
+tmp
 
 scripts/correction_tools/tmp
 scripts/evaluation/flo

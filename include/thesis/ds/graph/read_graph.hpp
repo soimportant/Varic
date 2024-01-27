@@ -242,12 +242,17 @@ public:
       auto [prev, prev_weight] = path[i - 1];
       auto [now, now_weight] = path[i];
       if constexpr (Reverse == false) {
-        if (g[prev].kmer.substr(1) != g[now].kmer.substr(0, kmer_size - 1)) {
+        auto a = g[prev].kmer.substr(1);
+        auto b = g[now].kmer.substr(0, kmer_size - 1);
+        if (a != b) {
+          spdlog::debug("Rev = {}, i = {}, prev = {}, now = {}", Reverse, i, g[prev].kmer, g[now].kmer);
           return false;
         }
       } else {
-        if (g[prev].kmer.substr(0, kmer_size - 1) !=
-            g[now].kmer.substr(1)) {
+        auto a = g[prev].kmer.substr(0, kmer_size - 1);
+        auto b = g[now].kmer.substr(1);
+        if (a != b) {
+          spdlog::debug("Rev = {}, i = {}, prev = {}, now = {}", Reverse, i, g[prev].kmer, g[now].kmer);
           return false;
         }
       }
