@@ -21,9 +21,9 @@ class Sequence {
         qual(std::move(qual)),
         forward_strain(forward_strain) {}
 
-  // delete copy constructor and copy assignment
-  Sequence(const Sequence&) = delete;
-  Sequence& operator=(const Sequence&) = delete;
+  // default copy constructor and copy assignment
+  Sequence(const Sequence&) = default;
+  Sequence& operator=(const Sequence&) = default;
 
   // default move constructor and move assignment
   Sequence(Sequence&&) = default;

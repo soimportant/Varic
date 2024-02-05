@@ -40,3 +40,11 @@ public:
     return this->q_id <=> rhs.q_id;
   }
 };
+
+
+std::ostream& operator<<(std::ostream& os, const Overlap& o) {
+  os << o.q_id << '\t' << o.q_idx_L << '\t' << o.q_idx_R << '\t' << o.q_seq_len
+     << '\t' << o.t_id << '\t' << o.t_idx_L << '\t' << o.t_idx_R << '\t'
+     << o.t_seq_len << '\t' << std::boolalpha << o.forward_strain;
+  return os;
+}
