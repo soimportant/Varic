@@ -37,7 +37,7 @@ add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/submodules)
 # spoa
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/include/spoa)
 
-link_libraries(spdlog spoa::spoa biovoltron edlib tcmalloc profiler)
+link_libraries(spdlog spoa::spoa biovoltron edlib indicators)
 
 include_directories(${CMAKE_CURRENT_LIST_DIR}/include)
 
@@ -59,8 +59,8 @@ if ("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang")
 endif()
 
 add_executable(main ${CMAKE_CURRENT_LIST_DIR}/src/main.cpp)
-add_executable(fasta2msa ${CMAKE_CURRENT_LIST_DIR}/src/fasta2msa.cpp)
+# add_executable(fasta2msa ${CMAKE_CURRENT_LIST_DIR}/src/fasta2msa.cpp)
 add_executable(test ${CMAKE_CURRENT_LIST_DIR}/src/test.cpp)
-add_executable(maf2fa ${CMAKE_CURRENT_LIST_DIR}/src/maf2fa.cpp)
+# add_executable(maf2fa ${CMAKE_CURRENT_LIST_DIR}/src/maf2fa.cpp)
 
 

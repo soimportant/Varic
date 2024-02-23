@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <array>
+#include <biovoltron/algo/assemble/graph/graph_wrapper.hpp>
+#include <boost/container/flat_map.hpp>
+#include <boost/graph/graphviz.hpp>
 #include <cstddef>
 #include <map>
 #include <numeric>
@@ -13,11 +16,6 @@
 #include <string_view>
 #include <vector>
 
-#include <biovoltron/algo/assemble/graph/graph_wrapper.hpp>
-#include <boost/container/flat_map.hpp>
-#include <boost/graph/graphviz.hpp>
-#include <boost/asio/thread_pool.hpp>
-
 namespace bio = biovoltron;
 namespace fs = std::filesystem;
 
@@ -28,7 +26,14 @@ constexpr static auto BASES_PER_BYTE_UNIT = BASES_PER_BYTE * sizeof(ByteUnit);
 constexpr static auto MAX_SPAN_LENGTH = 2u;
 constexpr static auto MAX_KMER_SIZE = BASES_PER_BYTE_UNIT * MAX_SPAN_LENGTH;
 
-struct ReadGraph {
+/* three-way operator for std::span<> */
+// template <typename T>
+// auto operator<=>(const std::span<T>& a, const std::span<T>& b) {
+//   return a.data() <=> b.data();
+// }
+
+// TODO: reallocate cause the memory address broken, need to fix it
+struct TestGraph {
  public:
   struct Param {
     /* For global assmebling */
@@ -77,21 +82,6 @@ struct ReadGraph {
     auto inside_range(const std::size_t start, const std::size_t end) const {
       auto it = appearances.lower_bound(start);
       return it != appearances.end() && *it <= end;
-    }
-
-    auto appearances_diff() const {
-      assert(!appearances.empty());
-      auto low = *appearances.begin();
-      auto high = *appearances.rbegin();
-      return high - low;
-    }
-
-    auto first_appearance() const { return *appearances.begin(); }
-
-    auto last_appearance() const { return *appearances.rbegin(); }
-
-    auto appearances_range() const {
-      return std::make_pair(first_appearance(), last_appearance());
     }
   };
 
@@ -178,7 +168,7 @@ struct ReadGraph {
     assert(start < end);
     auto vertices = std::vector<Vertex>{};
     for (const auto& [kmer, v] : kmer_to_vertex) {
-      if (g[v].inside_range(start, end)) {
+      if (v.inside_range(start, end)) {
         vertices.push_back(v);
       }
     }
@@ -224,7 +214,7 @@ struct ReadGraph {
    * @param v The vertex for which to retrieve the k-mer.
    * @return The k-mer associated with the vertex.
    */
-  auto get_kmer(const Vertex& v) noexcept -> KmerView {
+  auto get_kmer(const Vertex& v) const noexcept -> KmerView {
     return kmers[g[v].index];
   }
 
@@ -359,11 +349,9 @@ struct ReadGraph {
     return bio::Codec::to_string(read);
   }
 
-
   // TODO: extend source and sink
   template <bool Reverse = false>
   auto extend_path_at_end(Path& path) {}
-
 
   /* do local assemble between source and sink */
   template <bool Reverse = false>
@@ -414,19 +402,12 @@ struct ReadGraph {
     auto vis = std::set<Vertex>{};
     dfs(dfs, source, path, vis);
     // sort the paths by average weight
-    // TODO: may segfault on Ofast flag enabled 
     std::ranges::sort(paths, [](const auto& a, const auto& b) {
       auto cal_sum = [](const auto& path) {
-        assert(path.size() != 0);
-        auto sum = 0.0;
-        for (auto [v, w] : path) {
-          sum += w;
-        }
-        return sum;
+        return std::accumulate(
+            path.begin(), path.end(), 0.0,
+            [](const auto& a, const auto& b) { return a + b.second; });
       };
-      if (a.size() == 0 || b.size() == 0) {
-        spdlog::warn("The path size should not be 0!!!");
-      }
       return cal_sum(a) / a.size() > cal_sum(b) / b.size();
     });
     // spdlog::debug("There are {} paths.", paths.size());
@@ -517,7 +498,6 @@ struct ReadGraph {
     };
     assert(valid_path<Reverse>(path));
 
-    // TODO: segmentation fault here, check
     for (auto i = 0u; i < path.size(); i++) {
       if (i && path[i].second > 2 * path[i - 1].second) {
         // spdlog::debug("Found branch point at {}, i = {}",
@@ -621,7 +601,6 @@ struct ReadGraph {
       }
 
       path.emplace_back(v, w);
-      // TODO: remove the check of valid_path
       if (need_pop) {
         assert(valid_path<Reverse>(path));
       }
@@ -642,6 +621,7 @@ struct ReadGraph {
         } else {
           u = g.source(e);
         }
+        // edge_weights[i] = g[e].count / std::max(1ul, vis[u]);
         edge_weights[i] = g[e].count / (vis[u] + 1);
         edge_weight_sum += edge_weights[i];
         i += 1;
@@ -708,7 +688,7 @@ struct ReadGraph {
    * @param kmer_size The size of the k-mer.
    * @param max_assemble_len The maximum length for assembly.
    */
-  ReadGraph(const std::size_t kmer_size, const std::size_t max_assemble_len) {
+  TestGraph(const std::size_t kmer_size, const std::size_t max_assemble_len) {
     if (kmer_size > MAX_KMER_SIZE) {
       spdlog::warn("kmer_size should be less than {}", MAX_KMER_SIZE);
       this->kmer_size = MAX_KMER_SIZE;
@@ -768,7 +748,9 @@ struct ReadGraph {
     auto kmer = Kmer{};
     for (auto i = 0u; i < kmer_size; i += BASES_PER_BYTE_UNIT) {
       auto subseq = seq.substr(i, BASES_PER_BYTE_UNIT);
-      auto data = encode_seq_to_unit(subseq);
+      auto data = encode_seq_to_unit(seq.substr(i, BASES_PER_BYTE_UNIT));
+      // spdlog::debug("encode {} to {}", bio::Codec::to_string(subseq),
+      // pretty_print(data));
       kmer[i / BASES_PER_BYTE_UNIT] = data;
     }
     // spdlog::debug("kmer = {}", pretty_print(kmer));
@@ -818,27 +800,18 @@ struct ReadGraph {
     // don't use `prev_kmer`! we use Kmer.data() for comparing
     // if we use `prev_kmer` directly, then we need to change compare criteria
     // set_kmer_pos(g[prev_kmer].kmer, 0);
-    add_appearance_to_vertex(prev_vertex, 0 + left_bound);
+    add_pos_to_vertex(prev_vertex, 0 + left_bound);
     for (auto i = 1u; i + kmer_size <= sequence.size(); i++) {
-      auto now_kmer =
-          shift_kmer_and_append_base(prev_kmer, sequence[i + kmer_size - 1]);
+      auto now_kmer = shift_and_append(prev_kmer, sequence[i + kmer_size - 1]);
       assert(decode_kmer_to_seq(now_kmer) == sequence.substr(i, kmer_size));
       auto now_vertex = get_vertex(now_kmer);
-      add_appearance_to_vertex(now_vertex, i + left_bound);
+      add_pos_to_vertex(now_vertex, i + left_bound);
       increase_edge_weight(prev_vertex, now_vertex);
       prev_vertex = now_vertex;
       prev_kmer = now_kmer;
     }
   }
 
-  /**
-   * Determines if the given sequence is a source node in the graph.
-   *
-   * @param seq The sequence to check.
-   * @param weight_threshold The weight threshold for considering a node as a
-   * source.
-   * @return True if the sequence is a source node, false otherwise.
-   */
   auto is_source(bio::istring_view seq, const std::size_t weight_threshold) {
     if (seq.size() != kmer_size) {
       spdlog::warn("The size of the sequence should be {}, not {}", kmer_size,
@@ -849,15 +822,6 @@ struct ReadGraph {
     return is_source(kmer, weight_threshold);
   }
 
-  /**
-   * Determines if a given sequence is a sink in the graph.
-   * A sink is a node in the graph that has no outgoing edges.
-   *
-   * @param seq The sequence to check.
-   * @param weight_threshold The weight threshold for considering a node as a
-   * sink.
-   * @return True if the sequence is a sink, false otherwise.
-   */
   auto is_sink(bio::istring_view seq, const std::size_t weight_threshold) {
     if (seq.size() != kmer_size) {
       spdlog::warn("The size of the sequence should be {}, not {}", kmer_size,
@@ -869,17 +833,45 @@ struct ReadGraph {
   }
 
   /**
-   * @brief Retrieves the sources in the graph within a specified range and
-   * weight threshold.
-   *
-   * @param start The starting index of the range.
-   * @param end The ending index of the range.
-   * @param weight_threshold The weight threshold for filtering the sources.
-   * @return A vector containing the filtered and sorted sources.
+   * @brief add one sequence to the graph
+   * @param sequence the sequence to be added
+   * @param left_bound the left boundary of the sequence in the read
    */
+  // auto add_seq(const std::string& sequence, const std::size_t left_bound) {
+  //   if (sequence.size() < kmer_size) {
+  //     return;
+  //   }
+
+  //   auto update_appearance = [&](KmerView kmer, const std::size_t pos) {
+  //     kmer_appearances[kmer].insert(pos + left_bound);
+  //   };
+
+  //   auto prev_vertex = get_vertex(sequence.substr(0, kmer_size));
+  //   update_appearance(prev_vertex, 0);
+  //   for (auto i = 1u; i + kmer_size <= sequence.size(); i++) {
+  //     bool found = false;
+  //     for (const auto& edge : g.out_edges(prev_vertex, false)) {
+  //       const auto u = g.target(edge);
+  //       if (g[u].kmer.back() == sequence[i + kmer_size - 1]) {
+  //         g[edge].count += 1;
+  //         update_appearance(u, i);
+  //         prev_vertex = u;
+  //         found = true;
+  //         break;
+  //       }
+  //     }
+  //     if (!found) {
+  //       const auto v = get_vertex(sequence.substr(i, kmer_size));
+  //       update_appearance(v, i);
+  //       create_edge(prev_vertex, v);
+  //       prev_vertex = v;
+  //     }
+  //   }
+  // }
+
   auto get_sources(const std::size_t start, const std::size_t end,
                    const std::size_t weight_threshold) {
-    auto candidate_sources = find_vertexes_in_range(start, end);
+    auto candidate_sources = get_vertex_inside_range(start, end);
     // spdlog::debug("Find Sources({} - {}) using weight = {}: candidate.size()
     // = {}", start, end, weight_threshold,
     //               candidate_sources.size());
@@ -889,32 +881,31 @@ struct ReadGraph {
       return is_source(v, weight_threshold);
     });
     std::ranges::sort(sources, [this](const auto& a, const auto& b) {
-      const auto a_diff = g[a].appearances_diff();
-      const auto b_diff = g[b].appearances_diff();
+      const auto& a_appearances = g[a].appearances;
+      const auto& b_appearances = g[b].appearances;
+      assert(a_appearances.size() > 0 && b_appearances.size() > 0);
+
+      const auto a_first_pos = *a_appearances.begin();
+      const auto a_last_pos = *a_appearances.rbegin();
+      const auto b_first_pos = *b_appearances.begin();
+      const auto b_last_pos = *b_appearances.rbegin();
+
+      const auto a_diff = a_last_pos - a_first_pos;
+      const auto b_diff = b_last_pos - b_first_pos;
       if (a_diff != b_diff) {
         return a_diff < b_diff;
       }
-      return g[a].first_appearance() < g[b].first_appearance();
-      // auto [a_first_pos, a_last_pos] = g[a].appearances_range();
-      // auto [b_first_pos, b_last_pos] = g[b].appearances_range();
-      // return std::make_pair(a_last_pos, a_first_pos) <
-      //        std::make_pair(b_last_pos, b_first_pos);
+      if (a_last_pos != b_last_pos) {
+        return a_last_pos < b_last_pos;
+      }
+      return b_first_pos > a_first_pos;
     });
     return sources;
   }
 
-  /**
-   * @brief Retrieves the sinks in the graph within a specified range, based on
-   * a weight threshold.
-   *
-   * @param start The starting index of the range.
-   * @param end The ending index of the range.
-   * @param weight_threshold The weight threshold for determining sinks.
-   * @return std::vector<Vertex> The sinks found within the specified range.
-   */
   auto get_sinks(const std::size_t start, const std::size_t end,
                  const std::size_t weight_threshold) {
-    auto candidate_sinks = find_vertexes_in_range(start, end);
+    auto candidate_sinks = get_vertex_inside_range(start, end);
     // spdlog::debug("Find Sinks({} - {}) using weight = {}: candidate.size() =
     // {}", start, end, weight_threshold,
     //               candidate_sinks.size());
@@ -924,16 +915,25 @@ struct ReadGraph {
       return is_sink(v, weight_threshold);
     });
     std::ranges::sort(sinks, [this](const auto& a, const auto& b) {
-      const auto a_diff = g[a].appearances_diff();
-      const auto b_diff = g[b].appearances_diff();
+      const auto& a_appearances = g[a].appearances;
+      const auto& b_appearances = g[b].appearances;
+      assert(a_appearances.size() > 0 && b_appearances.size() > 0);
+      // .. 650 279 6440
+      // 408 839 0711
+      const auto a_first_pos = *a_appearances.begin();
+      const auto a_last_pos = *a_appearances.rbegin();
+      const auto b_first_pos = *b_appearances.begin();
+      const auto b_last_pos = *b_appearances.rbegin();
+
+      const auto a_diff = a_last_pos - a_first_pos;
+      const auto b_diff = b_last_pos - b_first_pos;
       if (a_diff != b_diff) {
         return a_diff < b_diff;
       }
-      return g[a].last_appearance() > g[b].last_appearance();
-      // const auto [a_first_pos, a_last_pos] = g[a].appearances_range();
-      // const auto [b_first_pos, b_last_pos] = g[b].appearances_range();
-      // return std::make_pair(a_last_pos, a_first_pos) <
-      //        std::make_pair(b_last_pos, b_first_pos);
+      if (a_first_pos != b_first_pos) {
+        return a_first_pos > b_first_pos;
+      }
+      return a_last_pos < b_last_pos;
     });
     return sinks;
   }

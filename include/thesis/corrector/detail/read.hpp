@@ -1,14 +1,14 @@
 #pragma once
 
-#include <edlib.h>
-#include <spdlog/spdlog.h>
-
 #include <atomic>
-#include <biovoltron/file_io/fasta.hpp>
 #include <concepts>
 #include <optional>
 #include <queue>
 #include <ranges>
+
+#include <biovoltron/file_io/fasta.hpp>
+#include <edlib.h>
+#include <spdlog/spdlog.h>
 
 #include "thesis/algo/assemble/read_assembler.hpp"
 #include "thesis/corrector/detail/overlap.hpp"
@@ -54,7 +54,7 @@ class ReadWrapper : public R {
   ReadWrapper& operator=(const ReadWrapper&) = delete;
 
   /* move constructor */
-  ReadWrapper(ReadWrapper&& rhs) : assembler(this->seq.size()) {
+  ReadWrapper(ReadWrapper&& rhs) {
     this->id = rhs.id;
     this->name = std::move(rhs.name);
     this->seq = std::move(rhs.seq);
@@ -66,7 +66,6 @@ class ReadWrapper : public R {
     this->finished_windows_cnt = rhs.finished_windows_cnt.load();
     this->need_corrected = rhs.need_corrected;
     this->overlap_range = std::move(rhs.overlap_range);
-    this->assembler = std::move(rhs.assembler);
     this->state = rhs.state.load();
     this->fragments = std::move(rhs.fragments);
   }
@@ -84,19 +83,18 @@ class ReadWrapper : public R {
     this->finished_windows_cnt = rhs.finished_windows_cnt.load();
     this->need_corrected = rhs.need_corrected;
     this->overlap_range = std::move(rhs.overlap_range);
-    this->assembler = std::move(rhs.assembler);
     this->state = rhs.state.load();
     this->fragments = std::move(rhs.fragments);
     return *this;
   }
 
-  ReadWrapper(R&& r) : R(std::move(r)), assembler(this->seq.size()){};
+  ReadWrapper(R&& r) : R(std::move(r)) {};
 
-  ReadWrapper() : assembler(0) {}
+  ReadWrapper() {}
 
   enum struct State {
     UNCORRECTED,
-    BUILD_WINDOW,
+    BUILDING_WINDOW,
     WAIT_FOR_ASSEMBLE,
     ASSEMBLING,
     ASSEMBLED,
@@ -136,7 +134,7 @@ class ReadWrapper : public R {
     index_range[this->id] = get_index_range(windows.size());
     indexes[this->id] = index_range[this->id].first;
     total_fragments += windows.size();
-    state = State::BUILD_WINDOW;
+    state = State::BUILDING_WINDOW;
   }
 
   /**
@@ -381,7 +379,7 @@ class ReadWrapper : public R {
   auto add_finished_window() noexcept {
     finished_windows_cnt++;
     if (finished_windows_cnt == windows.size()) {
-      auto expected = State::BUILD_WINDOW;
+      auto expected = State::BUILDING_WINDOW;
       state.compare_exchange_strong(expected, State::WAIT_FOR_ASSEMBLE);
       return true;
     }
@@ -461,9 +459,8 @@ class ReadWrapper : public R {
   auto subview(bool forward_strain, const std::size_t start,
                const std::size_t end) const {
     if (start > end) {
-      spdlog::error("start position {} is larger than end position {}", start,
-                    end);
-      throw std::invalid_argument("start position is larger than end position");
+      spdlog::error("start position {} is behind end position", start, end);
+      throw std::invalid_argument("start position is behind end position");
     }
 
     if (start > this->seq.size()) {
@@ -477,36 +474,76 @@ class ReadWrapper : public R {
     auto len = end - start;
 
     auto seq_view = std::string_view{};
-    auto qual_view = std::optional<std::string_view>{};
     seq_view = forward_strain ? this->seq : rc_seq;
-    if constexpr (std::same_as<R, bio::FastqRecord<R::encoded>>) {
-      qual_view = forward_strain ? this->qual : rev_qual.value();
+    if (seq_view.size() < real_start + len) {
+      spdlog::error("forward strain = {}, real_start = {}, len = {}",
+                    forward_strain, real_start, len);
+      spdlog::error("real_start + len > seq_view.size(), {} + {} > {}",
+                    real_start, len, seq_view.size());
+      throw std::out_of_range("end position is out of range of sequence");
     }
     seq_view = seq_view.substr(real_start, len);
+
+    auto qual_view = std::optional<std::string_view>{};
     if constexpr (std::same_as<R, bio::FastqRecord<R::encoded>>) {
+      qual_view = forward_strain ? this->qual : rev_qual.value();
+      assert(qual_view.has_value() && "qual_view is empty");
       qual_view = qual_view->substr(real_start, len);
     }
     return std::make_pair(seq_view, qual_view);
   }
 
-  auto get_fragment_cnt(std::size_t id) noexcept {
-    if (!fragment_cnt.contains(id)) {
-      spdlog::warn("read {} not contains fragments from read {}", this->id, id);
+  /**
+   * @brief Get the number of fragments for a given read ID.
+   *
+   * This function returns the number of fragments associated with a specific
+   * read ID. If the read ID is not found in the fragment count map, a warning
+   * message is logged and 0 is returned.
+   *
+   * @param read_id The ID of the read.
+   * @return The number of fragments for the given read ID.
+   */
+  auto get_fragment_cnt(std::size_t read_id) noexcept {
+    if (!fragment_cnt.contains(read_id)) {
+      spdlog::warn("read {} not contains fragments from read {}", this->id,
+                   read_id);
       return 0ul;
     }
-    return fragment_cnt[id];
+    return fragment_cnt[read_id];
   }
 
+  /**
+   * @brief Get the index range for fragments.
+   *
+   * This function returns a pair of indices representing the range of fragments
+   * to be processed. The function atomically updates the total number of
+   * fragments and returns the previous and next values.
+   *
+   * @param cnt The number of fragments to be processed.
+   * @return std::pair<std::size_t, std::size_t> The range of indices.
+   */
   auto get_index_range(std::size_t cnt) noexcept {
     auto expected = total_fragments.load();
     auto nxt_value = expected + cnt;
     while (!total_fragments.compare_exchange_weak(expected, nxt_value,
-                                                std::memory_order_acq_rel)) {
+                                                  std::memory_order_acq_rel)) {
       nxt_value = expected + cnt;
     }
     return std::make_pair(expected, nxt_value);
   }
 
+  /**
+   * @brief Retrieves the index for a given ID.
+   *
+   * This function returns the index of `fragments` associated with the given
+   * read ID, which is used when adding fragments into read ID. If the ID is not
+   * found in the indexes container, a warning message is logged and 0 is
+   * returned.
+   *
+   * @param id The ID for which to retrieve the index.
+   * @return The index associated with the given ID, or 0 if the ID is not
+   * found.
+   */
   auto get_index(std::size_t id) noexcept {
     if (!indexes.contains(id)) {
       spdlog::warn("read {} not contains fragments from read {}", this->id, id);
@@ -515,23 +552,54 @@ class ReadWrapper : public R {
     return indexes[id].fetch_add(1, std::memory_order_acq_rel);
   }
 
+  /**
+   * @brief Resizes the fragments vector based on the value of total_fragments.
+   *
+   * This function resizes the fragments vector to accommodate the specified
+   * number of fragments. The size of the vector is determined by the value of
+   * the total_fragments atomic variable.
+   *
+   * @note This function is noexcept.
+   */
   auto set_fragments_size() noexcept {
     fragments.resize(total_fragments.load());
   }
 
+  /**
+   * @brief Sets the corrected fragment at the specified index.
+   *
+   * This function sets the corrected fragment at the specified index in the
+   * fragments container. The index must be within the valid range of indices.
+   *
+   * @param idx The index of the fragment to set.
+   * @param fragment The corrected fragment to set.
+   */
   auto set_corrected_fragment(std::size_t idx, Sequence<std::string> fragment) {
     assert(idx < fragments.size() && "idx out of range");
     fragments[idx] = std::move(fragment);
   }
 
-  auto add_corrected_fragment(Sequence<std::string> fragment) {
-    fragments.emplace_back(std::move(fragment));
-    // assembler.add_seq(std::move(fragment));
-    // assembler.add_seq(fragment.seq, fragment.left_bound,
-    //                   fragment.right_bound);
-  }
-
+  /**
+   * @brief Assembles the corrected sequence from the fragments.
+   *
+   * This function assembles the corrected sequence from the fragments using the
+   * ReadAssembler. The assembled sequence is stored in the corrected_seq member
+   * variable, and the state is updated to ASSEMBLED.
+   *
+   * @return None
+   */
   auto assemble_corrected_seq() {
+    // {
+    //   auto path = fs::path(TMP_PATH) / "fragments" / (this->name + ".txt");
+    //   auto fout = std::ofstream(path);
+    //   for (auto& f : fragments) {
+    //     if (f.seq.size() >= 0) {
+    //       fout << f.left_bound << ' ' << f.right_bound << ' ' << f.seq <<
+    //       '\n';
+    //     }
+    //   }
+    // }
+    ReadAssembler assembler(this->seq.size());
     for (auto& f : fragments) {
       assembler.add_seq(std::move(f));
     }
@@ -548,11 +616,34 @@ class ReadWrapper : public R {
       w.clear();
     }
     windows.clear();
-    assembler.clear();
   }
 
   auto operator<=>(const ReadWrapper& rhs) const {
     return this->name <=> rhs.name;
+  }
+
+  auto check() const {
+    auto need_rc = false;
+    for (const auto& overlap : overlap_range) {
+      if (!overlap.forward_strain) {
+        need_rc = true;
+      }
+    }
+    if (need_rc && this->seq.size() != rc_seq.size()) {
+      spdlog::error("seq size not equal {} <-> {}", this->seq.size(),
+                    rc_seq.size());
+      return false;
+    }
+    if constexpr (std::same_as<R, bio::FastqRecord<R::encoded>>) {
+      if (need_rc) {
+        assert(rev_qual.has_value() && "rev_qual is empty");
+        if (this->qual.size() != rev_qual->size()) {
+          spdlog::error("qual size not equal");
+          return false;
+        }
+      }
+    }
+    return true;
   }
 
  private:
@@ -597,9 +688,6 @@ class ReadWrapper : public R {
    */
   std::vector<Sequence<std::string>> fragments;
   std::atomic_uint32_t total_fragments{0};
-
-  /* assembler of this read */
-  ReadAssembler assembler;
 
   std::string corrected_seq;
 };

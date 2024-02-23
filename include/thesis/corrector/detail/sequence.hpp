@@ -4,15 +4,15 @@
 #include <string_view>
 #include <type_traits>
 
-template <class T>
-concept StringLike = std::is_convertible_v<T, std::string_view>;
+template<class T, class CharType = T::value_type>
+concept StringLike = std::is_convertible_v<T, std::basic_string_view<CharType>>;
 
 template <StringLike T = std::string_view>
 class Sequence {
  public:
   Sequence() = default;
   Sequence(const std::size_t read_id, const std::size_t left_bound,
-           const std::size_t right_bound, T seq, std::optional<T> qual,
+           const std::size_t right_bound, T seq, std::optional<std::string_view> qual,
            const bool forward_strain)
       : read_id(read_id),
         left_bound(left_bound),
@@ -47,7 +47,7 @@ class Sequence {
    * the quality of `seq`, the sequence doesn't have quality score if
    * qual.has_value() == false
    */
-  std::optional<T> qual;
+  std::optional<std::string_view> qual;
 
   /* forward strain(true) or reverse strain(false) */
   bool forward_strain;

@@ -6,4 +6,5 @@ PointerAlignment: Left
 SpaceAfterCStyleCast: true
 LambdaBodyIndentation: OuterScope
 AlwaysBreakTemplateDeclarations: Yes
-IncludeBlocks: Regroup
+SortIncludes: CaseInsensitive
+IncludeBlocks: Preserve

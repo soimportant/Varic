@@ -1,26 +1,29 @@
 #pragma once
 
-#include <edlib.h>
-#include <gperftools/heap-profiler.h>
-
 #include <algorithm>
 #include <atomic>
-#include <chrono>
 #include <condition_variable>
 #include <cstdlib>
 #include <execution>
 #include <future>
 #include <mutex>
 #include <ranges>
-#include <spoa/spoa.hpp>
 #include <string_view>
 #include <thread>
 #include <vector>
 
-#include "thesis/algo/assemble/read_assembler.hpp"
+#include <edlib.h>
+#include <gperftools/heap-profiler.h>
+#include <omp.h>
+#include <boost/asio/post.hpp>
+#include <boost/asio/thread_pool.hpp>
+#include <indicators/cursor_control.hpp>
+#include <indicators/indeterminate_progress_bar.hpp>
+#include <indicators/progress_bar.hpp>
+#include <spoa/spoa.hpp>
+
 #include "thesis/corrector/detail/overlap.hpp"
 #include "thesis/corrector/detail/read.hpp"
-#include "thesis/corrector/detail/sequence.hpp"
 #include "thesis/corrector/detail/window.hpp"
 #include "thesis/format/paf.hpp"
 #include "thesis/utility/threadpool/threadpool.hpp"
@@ -67,15 +70,38 @@ class FragmentedReadCorrector {
     int extend = -6;
   } param;
 
+  auto init_progress_bar() {
+    using namespace indicators;
+    auto setup = [&](auto& bar, std::string prefix, auto color = Color::white) {
+      bar.set_option(option::BarWidth{30});
+      bar.set_option(option::Start{" ["});
+      bar.set_option(option::Fill{"="});
+      bar.set_option(option::Lead{">"});
+      bar.set_option(option::Remainder{" "});
+      bar.set_option(option::End{" ] "});
+      bar.set_option(option::PrefixText{prefix});
+      bar.set_option(option::ForegroundColor{color});
+      bar.set_option(option::ShowElapsedTime{true});
+      bar.set_option(option::ShowRemainingTime{true});
+      bar.set_option(option::FontStyles{std::vector<FontStyle>{FontStyle::bold}});
+    };
+    
+    setup(preprocess_bar, "Preprocess", Color::yellow);
+    setup(build_window_bar, "Init windows", Color::yellow);
+    setup(collect_corrected_seq_bar, "Collect corrected sequences", Color::yellow);
+    setup(assemble_corrected_seq_bar, "Assembling", Color::yellow);
+  }
 
   /**
-   * @brief
+   * @brief Creates windows for a single read.
    *
+   * This function initializes windows for a given read based on the maximum
+   * window length and window extend length parameters. It then adds overlaps
+   * from other reads into the windows if the corresponding reads need to be
+   * corrected. Finally, it calculates the index range and indexes for each
+   * overlap read.
    *
-   * @tparam R constrained by std::ranges::range
-   * @param raw_read
-   * @param overlap_range
-   * @return std::vector<Window>
+   * @param read The read for which windows are created.
    */
   auto make_windows_for_one_read(Read& read) {
     read.init_windows(param.max_window_len, param.window_extend_len);
@@ -92,34 +118,42 @@ class FragmentedReadCorrector {
     }
   }
 
-
   auto make_windows_for_all_read() {
-    auto total_windows = 0ul;
-    auto total_seqs = 0ul;
-    auto total_seqs_lens = 0ul;
+    std::size_t total_windows = 0ul;
+    std::size_t total_seqs = 0ul;
+    std::size_t total_seqs_lens = 0ul;
     const int take_reads = reads.size();
     // const int take_reads = 20;
 
-    spdlog::debug("Taking {} reads now", take_reads);
-    spdlog::info("Making windows for each reads...");
 
-#pragma omp parallel for num_threads(threads) \
-    reduction(+ : total_windows, total_seqs, total_seqs_lens)
-    for (int i = 0; i < take_reads; i++) {
-      auto& read = reads[i];
-      // for (auto& read : reads) {
-      make_windows_for_one_read(read);
-      total_windows += read.windows.size();
-      for (auto& w : read.windows) {
-        total_seqs += w.overlap_seqs.size();
-        for (auto& seq : w.overlap_seqs) {
-          total_seqs_lens += seq.seq.size();
+    spdlog::debug("Taking {} reads now", take_reads);
+    indicators::show_console_cursor(false);
+    build_window_bar.set_option(indicators::option::MaxProgress(take_reads));
+
+    #pragma omp parallel num_threads(threads)
+    {
+      #pragma omp for reduction(+ : total_windows, total_seqs, total_seqs_lens)
+      for (int i = 0; i < take_reads; i++) {
+        auto& read = reads[i];
+        make_windows_for_one_read(read);
+        total_windows += read.windows.size();
+        for (auto& w : read.windows) {
+          total_seqs += w.overlap_seqs.size();
+          for (auto& seq : w.overlap_seqs) {
+            total_seqs_lens += seq.seq.size();
+          }
         }
+        build_window_bar.tick();
+      }
+      build_window_bar.set_option(indicators::option::PostfixText{"allocating space for corrected sequences"});
+      #pragma omp for
+      for (int i = 0; i < take_reads; i++) {
+        reads[i].set_fragments_size();
       }
     }
-    for (int i = 0; i < take_reads; i++) {
-      reads[i].set_fragments_size();
-    }
+    collect_corrected_seq_bar.set_option(
+        indicators::option::MaxProgress(total_windows));
+
 
     spdlog::info("building window down, total = {}", total_windows);
     spdlog::debug("average windows in a read = {:.2f}",
@@ -130,317 +164,6 @@ class FragmentedReadCorrector {
                   static_cast<double>(total_seqs_lens) / total_seqs);
   }
 
-
- public:
-  auto set_alignment_params(int match, int mismatch, int gap, int extend) {
-    param.match = match;
-    param.mismatch = mismatch;
-    param.gap = gap;
-    param.extend = extend;
-  }
-
-  /**
-   * @brief correct the read
-   *
-   * @return auto
-   */
-  auto correct() {
-    assert(std::ranges::is_sorted(overlaps, {}, &Overlap::q_id) &&
-           "overlaps should be sorted by query id");
-
-    auto cv = std::condition_variable{};
-
-    // {
-    //   auto file = fs::path("/mnt/ec/ness/yolkee/thesis/tmp/wrong.txt");
-    //   auto fin = std::ifstream(file);
-    //   auto read_names = std::vector<std::string>{};
-    //   auto sampled_read_names = std::vector<std::string>{};
-    //   auto name = std::string{};
-    //   while (fin >> name) {
-    //     read_names.emplace_back(std::move(name));
-    //   }
-    //   // random sample 150 reads
-    //   std::ranges::sample(read_names, std::back_inserter(sampled_read_names),
-    //                       150, std::mt19937{std::random_device{}()});
-    //   for (auto& name : sampled_read_names) {
-    //     auto read_id = name2id[name];
-    //     wanted_read.emplace(read_id);
-    //   }
-    // }
-    
-
-    auto assemble_and_write = [&](Read& read) {
-      // TODO: if coverage is enough, then we can assemble the read
-      // remember that if we don't build the graph for this read, then there may
-      // have other read that doesn't have enough data for building graph, so we
-      // may need other mechanism to build the graph for this read.
-
-      if (!read.ready_to_assemble()) {
-        spdlog::debug("Read {} is not ready to assemble", read.name);
-        return false;
-      }
-      // this check is not correct, the read.overlap_reads_id may not contain 
-      // all source of fragments, due to preprocess step
-      // for (auto t_id : read.overlap_reads_id) {
-      //   if (!reads[t_id].ready_to_assemble() && !reads[t_id].is_assembled()) {
-      //     spdlog::debug("Read {}'s overlap read {} is not ready to assemble",
-      //                   read.name, reads[t_id].name);
-      //     return false;
-      //   }
-      // }
-      if (!read.acquire_assembling()) {
-        spdlog::debug("Read {} acquire assembling failed", read.name);
-        return false;
-      }
-
-      read.assemble_corrected_seq();
-      static std::atomic_int cnt = 0;
-      if (cnt % 100 == 0) {
-        spdlog::debug("cnt = {}, all = {}", cnt, filtered_raw_reads_size);
-      }
-      cnt++;
-      cv.notify_all();
-      return true;
-    };
-
-    auto window_pipeline = [&](Window& window) {
-      // TODO: check read is assembled or not, is yes, then skip this window
-
-      auto read_id = window.read_id;
-      // auto thread_id = threadpool.get_worker_id();
-
-      thread_local auto global_aln_engine = get_global_alignment_engine(
-        param.max_window_len,
-        param.match,
-        param.mismatch,
-        param.gap,
-        param.extend
-      );
-      thread_local auto semi_global_aln_engine = get_semi_global_alignment_engine(
-        param.max_window_len,
-        param.match,
-        param.mismatch,
-        param.gap,
-        param.extend
-      );
-      auto corrected_sequences = window.get_corrected_sequences(global_aln_engine, semi_global_aln_engine);
-      // window.build_variation_graph(engine);
-      // {
-      //   auto target_read = "01_10001";
-      //   auto found = false;
-      //   for (auto& seq : corrected_fragments) {
-      //     if (seq.read_id == name2id[target_read]) {
-      //       found = true;
-      //     }
-      //   }
-      //   if (found) {
-      //     auto path =
-      //         fs::path(fmt::format("{}/corrected_fragments/{}_{}.txt",
-      //         TMP_PATH,
-      //                              id2name[window.read_id], window.idx));
-      //     auto fout = std::ofstream(path);
-      //     for (auto& seq : corrected_fragments) {
-      //       auto fasta = bio::FastaRecord<false>{};
-      //       fasta.name = id2name[seq.read_id];
-      //       fasta.seq = seq.seq;
-      //       fout << fasta << '\n';
-      //     }
-      //     window.print_graph(path.replace_extension(".dot"),
-      //     name2id[target_read]);
-      //   }
-      // }
-      for (auto& seq : corrected_sequences) {
-        // auto lock = std::scoped_lock(mutexes[seq.read_id]);
-        auto index = reads[read_id].get_index(seq.read_id);
-        reads[seq.read_id].set_corrected_fragment(index, std::move(seq));
-      }
-      reads[read_id].add_finished_window();
-      window.clear();
-      // if (reads[window.read_id].ready_to_assemble()) {
-      //   // all windows in this read has been processed, we can check there's
-      //   // any read or itself need to be assembled
-      //   threadpool.submit(assemble_and_write,
-      //   std::ref(reads[window.read_id])); for (const auto& t_id :
-      //   reads[window.read_id].overlap_reads_id) {
-      //     threadpool.submit(assemble_and_write, std::ref(reads[t_id]));
-      //   }
-      // }
-      {
-        static int cnt = 0;
-        if (cnt % 10000 == 0) {
-          spdlog::debug("cnt = {}", cnt);
-        }
-        cnt++;
-      }
-    };
-
-    auto read_pipeline = [&](Read& read) {
-      make_windows_for_one_read(read);
-      auto& windows = read.windows;
-      for (auto& w : windows) {
-        auto [_, res] = threadpool.submit(window_pipeline, std::ref(w));
-      }
-      // threadpool.submit(assemble_and_write, std::ref(read));
-
-      if (read.id == name2id["01_10001"]) {
-        spdlog::debug("read {} has {} windows", read.name, read.windows.size());
-        for (auto i = 0u; i < read.windows.size(); i++) {
-          spdlog::debug("window {}({}, {}) has {} overlap seqs", i,
-                        read.windows[i].start, read.windows[i].end,
-                        read.windows[i].overlap_seqs.size());
-        }
-      }
-    };
-
-
-
-    // spdlog::debug("Pushed all read into pipeline...");
-    // // TODO fixed the order
-    // auto order = std::vector<std::size_t>(reads.size());
-    // std::iota(order.begin(), order.end(), 0);
-    // std::sort(order.begin(), order.end(), [&](int a, int b) {
-    //   return reads[a].overlap_range.size() < reads[b].overlap_range.size();
-    // });
-
-    // for (auto& x : order) {
-    //   auto& read = reads[x];
-    //   if (read.need_corrected) {
-    //     auto [_, res] = threadpool.submit(read_pipeline, std::ref(read));
-    //   }
-    // }
-    // spdlog::debug("Pushed read pipeline done");
-
-    {
-      make_windows_for_all_read();
-      spdlog::info("Build windows for all reads");
-
-      auto futures = std::vector<std::future<void>>{};
-      for (auto i = 0u; i < reads.size(); i++) {
-        auto& read = reads[i];
-        // {
-        //   bool found = false;
-        //   if (wanted_read.contains(read.id)) {
-        //     found = true;
-        //   }
-        //   for (auto& t_id : read.overlap_reads_id) {
-        //     if (wanted_read.contains(t_id)) {
-        //       found = true;
-        //     }
-        //   }
-        //   if (!found) {
-        //     continue;
-        //   }
-        // }
-        for (auto& w : read.windows) {
-          auto [_, res] = threadpool.submit(window_pipeline, std::ref(w));
-          futures.emplace_back(std::move(res));
-        }
-      }
-
-      for (auto& res : futures) {
-        res.get();
-      }
-      auto total_windows = 0ul;
-      for (auto& read : reads) {
-        total_windows += read.windows.size();
-      }
-      spdlog::info("Build windows done: total = {}", total_windows);
-    }
-
-    {
-      // spdlog::debug("check all window is ready for assembled");
-      // for (auto& read : reads) {
-      //   if (read.need_corrected && !read.ready_to_assemble()) {
-      //     spdlog::debug("read {} is not ready to assemble", read.name);
-      //   }
-      //   for (auto& t_id : read.overlap_reads_id) {
-      //     if (!reads[t_id].ready_to_assemble()) {
-      //       spdlog::debug("Read {} is not ready to assemble: {}",
-      //                     reads[t_id].name, reads[t_id].need_corrected);
-      //     }
-      //   }
-      // }
-    }
-
-    {
-      spdlog::info("Assembling all reads");
-      auto futures = std::vector<std::future<bool>>{};
-      for (auto i = 0u; i < reads.size(); i++) {
-        auto& read = reads[i];
-        // {
-        //   bool found = false;
-        //   if (wanted_read.contains(read.id)) {
-        //     found = true;
-        //   }
-        //   if (!found) {
-        //     continue;
-        //   }
-        // }
-        if (read.need_corrected && read.ready_to_assemble()) {
-          auto [_, res] = threadpool.submit(assemble_and_write, std::ref(read));
-          futures.emplace_back(std::move(res));
-        }
-      }
-      for (auto& res : futures) {
-        assert(res.get());
-      }
-    }
-
-    // threadpool.join();
-    // spdlog::debug("After join, corrected_reads.size() = {}",
-    // corrected_reads.size());
-
-    // {
-    //   spdlog::debug("Waiting all reads been assembled");
-    //   auto mutex = std::mutex{};
-    //   std::unique_lock lock(mutex);
-    //   cv.wait(lock, [&]() {
-    //     spdlog::debug("cv got notified, corrected_reads.size() = {}",
-    //     corrected_reads.size()); return corrected_reads.size() ==
-    //     filtered_raw_reads_size;
-    //   });
-    //   spdlog::debug("Done");
-    // }
-
-    // Do this check for there are some reads that are not assembled
-
-    // std::exit(0);
-
-    std::vector<bio::FastaRecord<false>> corrected_reads;
-
-    // TODO: remove this, use below
-    // for (auto id : wanted_read) {
-    //   auto& read = reads[id];
-    //   if (read.need_corrected) {
-    //     auto corrected_read = bio::FastaRecord<false>{
-    //         .name = read.name,
-    //         .seq = std::move(read.corrected_seq),
-    //     };
-    //     if (corrected_read.seq.size() != 0) {
-    //       corrected_reads.emplace_back(std::move(corrected_read));
-    //     }
-    //   }
-    // }
-
-#pragma omp parallel for num_threads(threads)
-    for (auto& read : reads) {
-      // spdlog::debug("Assemble read {}, len = {}", id2name[read.id],
-      // read.len());
-      auto corrected_read = bio::FastaRecord<false>{
-          .name = read.name,
-          .seq = std::move(read.corrected_seq),
-      };
-#pragma omp critical
-      if (corrected_read.seq.size() != 0) {
-        corrected_reads.emplace_back(std::move(corrected_read));
-      }
-    }
-    spdlog::debug("Filtered reads = {}", reads.size());
-    spdlog::debug("corrected_reads.size() = {}", corrected_reads.size());
-    return corrected_reads;
-  }
-
-private:
   /**
    * @brief Performs read preprocessing.
    *
@@ -450,51 +173,68 @@ private:
    * @param raw_reads The vector of raw reads to be preprocessed.
    */
   auto read_preprocess(std::vector<R>& raw_reads) {
-    spdlog::info("Read preprocessing...");
-
-    auto get_overlap_range = [&](const std::string& name) {
-      auto id = name2id[name];
-      auto st = std::ranges::lower_bound(overlaps, id, {}, &Overlap::q_id);
-      auto ed = std::ranges::upper_bound(overlaps, id, {}, &Overlap::q_id);
-      return std::ranges::subrange(st, ed);
-    };
-
-    auto valid_read = [&](Read& r) {
-      if (r.seq.size() < param.min_read_length) {
-        return false;
-      }
-      return true;
-    };
+    preprocess_bar.set_option(
+        indicators::option::PostfixText{"Read preprocessing"});
 
     reads.resize(raw_reads.size());
-#pragma omp parallel for
-    for (auto& r : raw_reads) {
-      auto read = Read(std::move(r));
-      read.id = name2id[read.name];
-      read.need_corrected = valid_read(read);
-      reads[read.id] = std::move(read);
-    }
-
     auto need_create_rc = std::vector<std::atomic_bool>(reads.size());
-#pragma omp parallel for
-    for (auto& read : reads) {
-      read.overlap_range = get_overlap_range(read.name);
-      for (const auto& overlap : read.overlap_range) {
-        if (reads[overlap.t_id].need_corrected) {
-          read.overlap_reads_id.emplace_back(overlap.t_id);
-        }
-        if (!overlap.forward_strain) {
-          need_create_rc[read.id] = true;
-          need_create_rc[overlap.t_id] = true;
-        }
-      }
-    }
 
-    for (auto i = 0u; i < reads.size(); i++) {
-      if (need_create_rc[i]) {
-        reads[i].create_rc();
+    auto identify_valid_read = [&]() {
+      auto valid_read = [&](Read& r) {
+        if (r.seq.size() < param.min_read_length) {
+          return false;
+        }
+        return true;
+      };
+#pragma omp parallel for num_threads(threads)
+      for (auto& r : raw_reads) {
+        auto read = Read(std::move(r));
+        read.id = name2id[read.name];
+        read.need_corrected = valid_read(read);
+        reads[read.id] = std::move(read);
       }
-    }
+      filtered_raw_reads_size =
+          std::ranges::count_if(reads, &Read::need_corrected);
+      assemble_corrected_seq_bar.set_option(
+          indicators::option::MaxProgress(filtered_raw_reads_size));
+    };
+
+    auto identify_overlap_range = [&]() {
+      auto get_overlap_range = [&](const std::string& name) {
+        auto id = name2id[name];
+        auto st = std::ranges::lower_bound(overlaps, id, {}, &Overlap::q_id);
+        auto ed = std::ranges::upper_bound(overlaps, id, {}, &Overlap::q_id);
+        return std::ranges::subrange(st, ed);
+      };
+#pragma omp parallel for
+      for (auto& read : reads) {
+        read.overlap_range = get_overlap_range(read.name);
+        for (const auto& overlap : read.overlap_range) {
+          if (reads[overlap.t_id].need_corrected) {
+            read.overlap_reads_id.emplace_back(overlap.t_id);
+          }
+          if (!overlap.forward_strain) {
+            need_create_rc[read.id] = true;
+            need_create_rc[overlap.t_id] = true;
+          }
+        }
+      }
+    };
+
+    auto create_rc = [&] {
+      for (auto i = 0u; i < reads.size(); i++) {
+        if (need_create_rc[i]) {
+          reads[i].create_rc();
+        }
+      }
+    };
+
+    identify_valid_read();
+    preprocess_bar.set_progress(80);
+    identify_overlap_range();
+    preprocess_bar.set_progress(95);
+    create_rc();
+    preprocess_bar.set_progress(100);
 
     for (auto& read : reads) {
       if (!read.check()) {
@@ -508,11 +248,6 @@ private:
         }
       }
     }
-    spdlog::debug("Pass precheck");
-
-    filtered_raw_reads_size =
-        std::ranges::count_if(reads, &Read::need_corrected);
-    assert(reads.size() == raw_reads.size());
   }
 
   /**
@@ -522,7 +257,8 @@ private:
    * @return
    */
   auto overlap_preprocess(std::vector<bio::PafRecord>& overlaps) {
-    spdlog::info("Overlap preprocessing...");
+    preprocess_bar.set_option(
+        indicators::option::PostfixText{"Overlap preprocessing"});
 
     // In original .paf file of overlaps between raw_reads, the match base
     // devided by alignment length is very low, figure out how it be computed
@@ -585,7 +321,7 @@ private:
     };
 
     auto filtered_overlaps = std::vector<Overlap>{};
-#pragma omp parallel for
+#pragma omp parallel for num_threads(threads)
     for (auto& paf : overlaps) {
       /* there's no std::ranges::move_if(), so sad */
       if (valid_overlap(paf)) {
@@ -609,6 +345,7 @@ private:
     std::sort(std::execution::par, filtered_overlaps.begin(),
               filtered_overlaps.end());
     std::swap(this->overlaps, filtered_overlaps);
+    preprocess_bar.set_progress(70);
   }
 
   auto check() {
@@ -639,17 +376,194 @@ private:
     unfiltered_overlap_size = overlaps.size();
     mutexes = std::vector<std::mutex>(raw_reads.size());
     /* transform read name to id */
+    indicators::show_console_cursor(false);
+    preprocess_bar.set_progress(0);
     for (auto& read : raw_reads) {
       auto id = name2id.size();
       name2id[read.name] = id;
       id2name[id] = read.name;
     }
+    preprocess_bar.set_progress(5);
+    preprocess_bar.set_option(
+        indicators::option::PostfixText{"Transforming read name to id"});
     overlap_preprocess(overlaps);
     read_preprocess(raw_reads);
     check();
   }
 
-public:
+
+  auto collect_corrected_fragments() {
+    auto cv = std::condition_variable{};
+    auto window_pipeline = [&](Window& window) {
+      // TODO: check read is assembled or not, is yes, then skip this window
+
+      auto read_id = window.read_id;
+      // auto thread_id = threadpool.get_worker_id();
+
+      thread_local auto global_aln_engine =
+          get_global_alignment_engine(param.max_window_len, param.match,
+                                      param.mismatch, param.gap, param.extend);
+      thread_local auto local_aln_engine =
+          get_local_alignment_engine(param.max_window_len, param.match,
+                                           param.mismatch, param.gap,
+                                           param.extend);
+      auto corrected_fragments = window.get_corrected_fragments(
+          global_aln_engine, local_aln_engine);
+      for (auto& seq : corrected_fragments) {
+        auto index = reads[read_id].get_index(seq.read_id);
+        reads[seq.read_id].set_corrected_fragment(index, std::move(seq));
+      }
+      reads[read_id].add_finished_window();
+      window.clear();
+      static std::atomic_int finished_windows_cnt = 0;
+      finished_windows_cnt++;
+      if (finished_windows_cnt % 10 == 0) {
+        collect_corrected_seq_bar.set_progress(finished_windows_cnt);
+      }
+      cv.notify_one();
+      // if (reads[window.read_id].ready_to_assemble()) {
+      //   // all windows in this read has been processed, jwe can check there's
+      //   // any read or itself need to be assembled
+      //   threadpool.submit(assemble_and_write,
+      //   std::ref(reads[window.read_id])); 
+      // for (const auto& t_id :
+      //   reads[window.read_id].overlap_reads_id) {
+      //     threadpool.submit(assemble_and_write, std::ref(reads[t_id]));
+      //   }
+      // }
+    };
+
+    make_windows_for_all_read();
+    // spdlog::info("Build windows for all reads");
+    for (auto i = 0u; i < reads.size(); i++) {
+      auto& read = reads[i];
+      for (auto& w : read.windows) {
+        boost::asio::post(
+            threadpool, [&, w = std::ref(w)]() mutable { window_pipeline(w); });
+      }
+    }
+    std::mutex mutex;
+    std::unique_lock lock(mutex);
+    cv.wait(lock, [&]() { return collect_corrected_seq_bar.is_completed(); });
+    spdlog::info("Collected corrected sequence for each read");
+  }
+
+  auto assemble_corrected_read() {
+    auto assemble_and_write = [&](Read& read) {
+      // TODO: if coverage is enough, then we can assemble the read
+      // remember that if we don't build the graph for this read, then there may
+      // have other read that doesn't have enough data for building graph, so we
+      // may need other mechanism to build the graph for this read.
+      if (!read.ready_to_assemble()) {
+        spdlog::debug("Read {} is not ready to assemble", read.name);
+        return false;
+      }
+      // this check is not correct, the read.overlap_reads_id may not contain
+      // all source of fragments, due to preprocess step
+      // for (auto t_id : read.overlap_reads_id) {
+      //   if (!reads[t_id].ready_to_assemble() && !reads[t_id].is_assembled())
+      //   {
+      //     spdlog::debug("Read {}'s overlap read {} is not ready to assemble",
+      //                   read.name, reads[t_id].name);
+      //     return false;
+      //   }
+      // }
+      if (!read.acquire_assembling()) {
+        spdlog::debug("Read {} acquire assembling failed", read.name);
+        return false;
+      }
+      read.assemble_corrected_seq();
+      assemble_corrected_seq_bar.tick();
+      return true;
+    };
+
+    spdlog::info("Assembling all reads");
+    auto futures = std::vector<std::future<bool>>{};
+    for (auto i = 0u; i < reads.size(); i++) {
+      auto& read = reads[i];
+      // {
+      //   bool found = false;
+      //   if (wanted_read.contains(read.id)) {
+      //     found = true;
+      //   }
+      //   if (!found) {
+      //     continue;
+      //   }
+      // }
+      if (read.need_corrected && read.ready_to_assemble()) {
+        boost::asio::post(threadpool, [&, read = std::ref(read)]() mutable {
+          assemble_and_write(read);
+        });
+        // auto [_, res] = threadpool.submit(assemble_and_write,
+        // std::ref(read)); futures.emplace_back(std::move(res));
+      }
+    }
+    threadpool.wait();
+  }
+  
+
+
+ public:
+
+  /**
+   * @brief Sets the alignment parameters for the corrector.
+   * 
+   * @param match The score for a match between two characters.
+   * @param mismatch The score for a mismatch between two characters.
+   * @param gap The score for introducing a gap in the alignment.
+   * @param extend The score for extending an existing gap in the alignment.
+   */
+  auto set_alignment_params(int match, int mismatch, int gap, int extend) {
+    param.match = match;
+    param.mismatch = mismatch;
+    param.gap = gap;
+    param.extend = extend;
+  }
+
+  /**
+   * @brief correct the read
+   *
+   * @return auto
+   */
+  auto correct() {
+
+    collect_corrected_fragments();
+    assemble_corrected_read();
+
+    std::vector<bio::FastaRecord<false>> corrected_reads;
+
+    // TODO: remove this, use below
+    // for (auto id : wanted_read) {
+    //   auto& read = reads[id];
+    //   if (read.need_corrected) {
+    //     auto corrected_read = bio::FastaRecord<false>{
+    //         .name = read.name,
+    //         .seq = std::move(read.corrected_seq),
+    //     };
+    //     if (corrected_read.seq.size() != 0) {
+    //       corrected_reads.emplace_back(std::move(corrected_read));
+    //     }
+    //   }
+    // }
+
+#pragma omp parallel for num_threads(threads)
+    for (auto& read : reads) {
+      // spdlog::debug("Assemble read {}, len = {}", id2name[read.id],
+      // read.len());
+      auto corrected_read = bio::FastaRecord<false>{
+          .name = read.name,
+          .seq = std::move(read.corrected_seq),
+      };
+#pragma omp critical
+      if (corrected_read.seq.size() != 0) {
+        corrected_reads.emplace_back(std::move(corrected_read));
+      }
+    }
+    spdlog::debug("Filtered reads = {}", reads.size());
+    spdlog::debug("corrected_reads.size() = {}", corrected_reads.size());
+    return corrected_reads;
+  }
+
   auto print_info() {
     if constexpr (std::same_as<R, bio::FastqRecord<R::encoded>>) {
       spdlog::info("Read type: Fastq");
@@ -670,9 +584,10 @@ public:
       const int thread_num = std::thread::hardware_concurrency(),
       bool debug = false)
       : threads(thread_num),
-        threadpool(bio::make_threadpool(this->threads)),
+        threadpool(this->threads),
         platform(platform),
         debug(debug) {
+    init_progress_bar();
     preprocess(raw_reads, overlaps);
     print_info();
   }
@@ -700,12 +615,18 @@ public:
 
   /* max threads and threadpool */
   std::size_t threads;
-  bio::ThreadPool<> threadpool;
+  boost::asio::thread_pool threadpool;
 
   /* sequencing platform of raw_reads */
   // TODO: should be enum class
   std::string platform;
   std::mutex corrected_reads_mutex;
+
+  /* progress bar */
+  indicators::ProgressBar preprocess_bar;
+  indicators::ProgressBar build_window_bar;
+  indicators::ProgressBar collect_corrected_seq_bar;
+  indicators::ProgressBar assemble_corrected_seq_bar;
 
   /* debug flag */
   bool debug = false;

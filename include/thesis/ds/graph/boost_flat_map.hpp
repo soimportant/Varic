@@ -13,10 +13,9 @@
 #include <string_view>
 #include <vector>
 
-#include <biovoltron/algo/assemble/graph/graph_wrapper.hpp>
 #include <boost/container/flat_map.hpp>
 #include <boost/graph/graphviz.hpp>
-#include <boost/asio/thread_pool.hpp>
+#include <biovoltron/algo/assemble/graph/graph_wrapper.hpp>
 
 namespace bio = biovoltron;
 namespace fs = std::filesystem;
@@ -28,7 +27,14 @@ constexpr static auto BASES_PER_BYTE_UNIT = BASES_PER_BYTE * sizeof(ByteUnit);
 constexpr static auto MAX_SPAN_LENGTH = 2u;
 constexpr static auto MAX_KMER_SIZE = BASES_PER_BYTE_UNIT * MAX_SPAN_LENGTH;
 
-struct ReadGraph {
+/* three-way operator for std::span<> */
+// template <typename T>
+// auto operator<=>(const std::span<T>& a, const std::span<T>& b) {
+//   return a.data() <=> b.data();
+// }
+
+// TODO: reallocate cause the memory address broken, need to fix it
+struct TestGraph {
  public:
   struct Param {
     /* For global assmebling */
@@ -49,9 +55,9 @@ struct ReadGraph {
   struct KmerViewHash {
     std::size_t operator()(const KmerView& kmer) const {
       return std::accumulate(kmer.begin(), kmer.end(), ByteUnit(0),
-                             [](const auto& a, const auto& b) {
-        return a ^ std::hash<ByteUnit>{}(b);
-      });
+                            [](const auto& a, const auto& b) {
+                              return a ^ std::hash<ByteUnit>{}(b);
+                            });
     }
   };
 
@@ -61,38 +67,28 @@ struct ReadGraph {
     }
   };
 
-  template <class T>
-  using KmerMap = std::unordered_map<KmerView, T, KmerViewHash, KmerViewEqual>;
-  // using KmerMap = boost::container::flat_map<Kmer, T>
+  struct KmerViewLess {
+    bool operator()(const KmerView& a, const KmerView& b) const {
+      return std::ranges::lexicographical_compare(a, b);
+    }
+  };
+
+  struct KmerLess {
+    bool operator()(const Kmer& a, const Kmer& b) const {
+      return std::ranges::lexicographical_compare(a, b);
+    }
+  };
+
+  // if you use your own flat_map, you need to maintain the KmerView 
+  template<class T>
+  // using KmerMap = std::unordered_map<KmerView, T, KmerViewHash, KmerViewEqual>;
+  using KmerMap = boost::container::flat_map<Kmer, T, KmerLess>;
+
 
   struct VertexProperty {
     // index at kmers
     std::size_t index;
     std::set<std::size_t> appearances;
-
-    auto add_appearance(const std::size_t pos) noexcept {
-      appearances.insert(pos);
-    }
-
-    auto inside_range(const std::size_t start, const std::size_t end) const {
-      auto it = appearances.lower_bound(start);
-      return it != appearances.end() && *it <= end;
-    }
-
-    auto appearances_diff() const {
-      assert(!appearances.empty());
-      auto low = *appearances.begin();
-      auto high = *appearances.rbegin();
-      return high - low;
-    }
-
-    auto first_appearance() const { return *appearances.begin(); }
-
-    auto last_appearance() const { return *appearances.rbegin(); }
-
-    auto appearances_range() const {
-      return std::make_pair(first_appearance(), last_appearance());
-    }
   };
 
   struct EdgeProperty {
@@ -104,47 +100,16 @@ struct ReadGraph {
   using Edge = typename Graph::Edge;
   using Path = std::vector<std::pair<Vertex, std::size_t>>;
 
-  /**
-   * @brief Create a vertex object
-   *
-   * @param kmer the kmer that stores into vertex
-   * @return Vertex
-   */
-  auto create_vertex(KmerView kmer) {
-    auto new_kmer = Kmer{};
-    std::ranges::copy(kmer, new_kmer.begin());
-    kmers.emplace_back(new_kmer);
+  auto create_vertex(const Kmer& kmer) {
 
     const auto v = g.create_vertex();
-    g[v].index = kmers.size() - 1;
-    kmer_to_vertex[kmers.back()] = v;
-
-    if (kmers.size() == kmers.capacity()) {
-      auto new_kmers = std::vector<Kmer>{};
-      auto new_kmer_to_vertex = KmerMap<Vertex>{};
-
-      new_kmers.reserve(kmers.size() * 1.5);
-      for (auto i = 0u; i < kmers.size(); i++) {
-        new_kmers.push_back(kmers[i]);
-        new_kmer_to_vertex[new_kmers.back()] = kmer_to_vertex[kmers[i]];
-      }
-
-      std::swap(kmers, new_kmers);
-      std::swap(kmer_to_vertex, new_kmer_to_vertex);
-    }
+    kmer_to_vertex[kmer] = v;
 
     // debug
     // vertex_to_kmer[v] = kmer;
     return v;
   }
 
-  /**
-   * @brief Create a edge object
-   *
-   * @param u The source vertex
-   * @param v The target vertex
-   * @return Edge
-   */
   auto create_edge(const Vertex& u, const Vertex& v) {
     const auto e = g.create_edge(u, v);
     // debug
@@ -152,48 +117,13 @@ struct ReadGraph {
     return e;
   }
 
-  /**
-   * Retrieves the vertex associated with the given KmerView.
-   * If the vertex already exists in the graph, it is returned.
-   * Otherwise, a new vertex is created and returned.
-   *
-   * @param kmer The KmerView to retrieve the vertex for.
-   * @return The vertex associated with the given KmerView.
-   */
-  auto get_vertex(KmerView kmer) {
+  auto get_vertex(const Kmer& kmer) {
     if (kmer_to_vertex.contains(kmer)) {
       return kmer_to_vertex[kmer];
     }
     return create_vertex(kmer);
   }
 
-  /**
-   * Finds the vertexes within a specified range of appearances.
-   *
-   * @param start The start index of the range.
-   * @param end The end index of the range.
-   * @return A vector of vertexes that fall within the specified range.
-   */
-  auto find_vertexes_in_range(const std::size_t start, const std::size_t end) {
-    assert(start < end);
-    auto vertices = std::vector<Vertex>{};
-    for (const auto& [kmer, v] : kmer_to_vertex) {
-      if (g[v].inside_range(start, end)) {
-        vertices.push_back(v);
-      }
-    }
-    return vertices;
-  }
-
-  /**
-   * Retrieves the edge between two vertices if it exists, otherwise creates a
-   * new edge.
-   *
-   * @param u The source vertex.
-   * @param v The target vertex.
-   * @return The edge between the two vertices, or a newly created edge if it
-   * doesn't exist.
-   */
   auto get_edge(const Vertex& u, const Vertex& v) {
     for (const auto e : g.out_edges(u, false)) {
       if (g.target(e) == v) {
@@ -203,144 +133,97 @@ struct ReadGraph {
     return create_edge(u, v);
   }
 
-  /**
-   * Increases the weight of the edge between vertices u and v by the specified
-   * amount. If the edge does not exist, it will be created with the specified
-   * weight.
-   *
-   * @param u The source vertex.
-   * @param v The target vertex.
-   * @param weight The amount by which to increase the edge weight (default: 1).
-   */
   auto increase_edge_weight(const Vertex& u, const Vertex& v,
                             std::size_t weight = 1) {
     const auto e = get_edge(u, v);
     g[e].count += weight;
   }
 
-  /**
-   * Retrieves the k-mer associated with the given vertex.
-   *
-   * @param v The vertex for which to retrieve the k-mer.
-   * @return The k-mer associated with the vertex.
-   */
-  auto get_kmer(const Vertex& v) noexcept -> KmerView {
-    return kmers[g[v].index];
-  }
-
-  /**
-   * @brief Adds an appearance to the specified vertex at the given position.
-   *
-   * @param v The vertex to add the appearance to.
-   * @param pos The position of the appearance.
-   */
-  auto add_appearance_to_vertex(const Vertex& v,
-                                const std::size_t pos) noexcept {
-    g[v].add_appearance(pos);
-  }
-
-  /**
-   * Calculates the sum of outgoing edge weights from a given vertex.
-   *
-   * @param v The vertex for which to calculate the sum of outgoing edge
-   * weights.
-   * @return The sum of outgoing edge weights from the given vertex.
-   */
-  auto cal_outgoing_weight_sum(const Vertex& v) {
+  auto out_weight_sum(const Vertex& v) {
     auto out_edges = g.out_edges(v, false);
     return std::accumulate(
         out_edges.begin(), out_edges.end(), 0.0,
         [this](const auto& a, const auto& b) { return a + g[b].count; });
   }
 
-  /**
-   * Calculates the sum of incoming edge weights for a given vertex.
-   *
-   * @param v The vertex for which to calculate the sum of incoming edge
-   * weights.
-   * @return The sum of incoming edge weights for the given vertex.
-   */
-  auto cal_incoming_weight_sum(const Vertex& v) {
+  auto in_weight_sum(const Vertex& v) {
     auto in_edges = g.in_edges(v, false);
     return std::accumulate(
         in_edges.begin(), in_edges.end(), 0.0,
         [this](const auto& a, const auto& b) { return a + g[b].count; });
   }
 
-  /**
-   * Determines whether a vertex is a source in the graph.
-   * A vertex is considered a source if it has no incoming edges and at least
-   * one outgoing edge with a count greater than or equal to the specified
-   * weight threshold.
-   *
-   * @param v The vertex to check.
-   * @param weight_threshold The minimum weight threshold for outgoing edges.
-   * @return True if the vertex is a source, false otherwise.
-   */
+  auto get_vertex_inside_range(const std::size_t start, const std::size_t end) {
+    assert(start < end);
+    auto vertices = std::vector<Vertex>{};
+    for (const auto& [kmer, v] : kmer_to_vertex) {
+      const auto& appearances = g[v].appearances;
+      auto it = appearances.lower_bound(start);
+      if (it != appearances.end() && *it <= end) {
+        vertices.push_back(v);
+      }
+    }
+    // for (const auto& [kmer, appearance] : kmer_appearances) {
+    //   auto it = appearance.lower_bound(start);
+    //   if (it != appearance.end() && *it <= end) {
+    //     vertices.push_back(kmer_to_vertex[kmer]);
+    //   }
+    // }
+    return vertices;
+  }
+
   auto is_source(const Vertex& v, const std::size_t weight_threshold) {
-    const auto func = [&, this](const auto& e) {
-      return g[e].count >= weight_threshold;
-    };
-    auto out_degree = std::ranges::count_if(g.out_edges(v, false), func);
-    auto in_degree = std::ranges::count_if(g.in_edges(v, false), func);
+    auto out_degree = std::ranges::count_if(
+        g.out_edges(v, false),
+        [&, this](const auto& e) { return g[e].count >= weight_threshold; });
+    auto in_degree = std::ranges::count_if(
+        g.in_edges(v, false),
+        [&, this](const auto& e) { return g[e].count >= weight_threshold; });
     return in_degree == 0 && out_degree > 0;
   }
 
-  /**
-   * Determines if a given kmer is a source vertex in the graph.
-   * A source vertex is defined as a vertex with no incoming edges.
-   *
-   * @param kmer The kmer to check.
-   * @param weight_threshold The weight threshold for considering an edge.
-   * @return True if the kmer is a source vertex, false otherwise.
-   */
-  auto is_source(KmerView kmer, const std::size_t weight_threshold) {
+  auto is_source(const Kmer& kmer, const std::size_t weight_threshold) {
     auto v = get_vertex(kmer);
     return is_source(v, weight_threshold);
   }
 
-  /**
-   * Determines whether a vertex is a sink in the graph.
-   * A sink is a vertex with no outgoing edges and at least one incoming edge
-   * with a count greater than or equal to the specified weight threshold.
-   *
-   * @param v The vertex to check.
-   * @param weight_threshold The minimum weight threshold for incoming edges.
-   * @return True if the vertex is a sink, false otherwise.
-   */
   auto is_sink(const Vertex& v, const std::size_t weight_threshold) {
-    const auto func = [&, this](const auto& e) {
-      return g[e].count >= weight_threshold;
-    };
-    auto out_degree = std::ranges::count_if(g.out_edges(v, false), func);
-    auto in_degree = std::ranges::count_if(g.in_edges(v, false), func);
+    auto out_degree = std::ranges::count_if(
+        g.out_edges(v, false),
+        [&, this](const auto& e) { return g[e].count >= weight_threshold; });
+    auto in_degree = std::ranges::count_if(
+        g.in_edges(v, false),
+        [&, this](const auto& e) { return g[e].count >= weight_threshold; });
     return in_degree > 0 && out_degree == 0;
   }
 
-  /**
-   * Determines if a given k-mer is a sink in the graph.
-   * A sink is a vertex with no outgoing edges.
-   *
-   * @param kmer The k-mer to check.
-   * @param weight_threshold The weight threshold for considering a vertex as a
-   * sink.
-   * @return True if the k-mer is a sink, false otherwise.
-   */
-  auto is_sink(KmerView kmer, const std::size_t weight_threshold) {
+  auto is_sink(const Kmer kmer, const std::size_t weight_threshold) {
     auto v = get_vertex(kmer);
     return is_sink(v, weight_threshold);
   }
 
   /**
-   * Concatenates the vertices in the given path to the source vertex and
-   * returns the resulting sequence.
-   *
-   * @tparam Reverse A boolean value indicating whether the vertices should be
-   * concatenated in reverse order.
-   * @param source The source vertex.
-   * @param path The path containing the vertices to be concatenated.
-   * @return The concatenated sequence.
+   * @brief Call this when the graph is ready to assemble something
+   * 
+   * @return auto 
    */
+  auto set_vertex_index() {
+    for (auto idx = 0; auto [kmer, v] : kmer_to_vertex) {
+      assert(idx == kmer_to_vertex.index_of(kmer_to_vertex.find(kmer)));
+      g[v].index = idx;
+      idx += 1;
+    }
+  }
+
+  auto get_kmer(const Vertex& v) -> KmerView {
+    return kmer_to_vertex.nth(g[v].index)->first;
+    // return kmers[g[v].index];
+  }
+
+  auto add_pos_to_vertex(const Vertex& v, const std::size_t pos) {
+    g[v].appearances.insert(pos);
+  }
+
   template <bool Reverse = false>
   auto concat_vertices(const Vertex& source, Path& path) {
     assert(valid_path<Reverse>(path));
@@ -359,11 +242,9 @@ struct ReadGraph {
     return bio::Codec::to_string(read);
   }
 
-
   // TODO: extend source and sink
   template <bool Reverse = false>
   auto extend_path_at_end(Path& path) {}
-
 
   /* do local assemble between source and sink */
   template <bool Reverse = false>
@@ -414,36 +295,30 @@ struct ReadGraph {
     auto vis = std::set<Vertex>{};
     dfs(dfs, source, path, vis);
     // sort the paths by average weight
-    // TODO: may segfault on Ofast flag enabled 
     std::ranges::sort(paths, [](const auto& a, const auto& b) {
-      auto cal_sum = [](const auto& path) {
-        assert(path.size() != 0);
-        auto sum = 0.0;
-        for (auto [v, w] : path) {
-          sum += w;
-        }
-        return sum;
-      };
-      if (a.size() == 0 || b.size() == 0) {
-        spdlog::warn("The path size should not be 0!!!");
-      }
-      return cal_sum(a) / a.size() > cal_sum(b) / b.size();
+      auto a_sum = std::accumulate(
+          a.begin(), a.end(), 0.0,
+          [](const auto& a, const auto& b) { return a + b.second; });
+      auto b_sum = std::accumulate(
+          b.begin(), b.end(), 0.0,
+          [](const auto& a, const auto& b) { return a + b.second; });
+      return a_sum / a.size() > b_sum / b.size();
     });
     // spdlog::debug("There are {} paths.", paths.size());
     // for (auto& path : paths) {
-    // auto weight_sum = std::accumulate(
-    //     path.begin(), path.end(), 0.0,
-    //     [](const auto &a, const auto &b) { return a + b.second; });
-    // auto [mn, mx] = std::ranges::minmax_element(
-    //     path.begin(), path.end(),
-    //     [](const auto &a, const auto &b) { return a.second < b.second; });
-    // auto s = std::string{};
-    // for (auto [v, w] : path) {
-    //   s.push_back(g[v].kmer.back());
-    // }
-    // spdlog::debug("candidate({}, {}, {:.3f}): {}, ", mn->second,
-    // mx->second,
-    //               weight_sum / path.size(), s);
+      // auto weight_sum = std::accumulate(
+      //     path.begin(), path.end(), 0.0,
+      //     [](const auto &a, const auto &b) { return a + b.second; });
+      // auto [mn, mx] = std::ranges::minmax_element(
+      //     path.begin(), path.end(),
+      //     [](const auto &a, const auto &b) { return a.second < b.second; });
+      // auto s = std::string{};
+      // for (auto [v, w] : path) {
+      //   s.push_back(g[v].kmer.back());
+      // }
+      // spdlog::debug("candidate({}, {}, {:.3f}): {}, ", mn->second,
+      // mx->second,
+      //               weight_sum / path.size(), s);
     // }
     assert(paths.size() > 0);
     return paths[0];
@@ -454,14 +329,11 @@ struct ReadGraph {
     auto sz = path.size();
 
     auto print_path = [&]() {
-      spdlog::debug("Data address: ({} - {})", fmt::ptr(kmers.front().data()),
-                    fmt::ptr(kmers.back().data()));
       for (int i = 0; i < path.size(); i++) {
         auto [v, weight] = path[i];
         auto kmer = get_kmer(v);
         spdlog::debug("i = {}, v = {}, data = {}, weight = {}", i,
-                      bio::Codec::to_string(decode_kmer_to_seq(kmer)),
-                      fmt::ptr(kmer.data()), weight);
+                      bio::Codec::to_string(decode_kmer_to_seq(kmer)), fmt::ptr(kmer.data()), weight);
       }
     };
 
@@ -475,7 +347,8 @@ struct ReadGraph {
         auto b = decode_kmer_to_seq(now_kmer).substr(0, kmer_size - 1);
         if (a != b) {
           spdlog::debug("Rev = {}, i = {}, prev = {}, now = {}", Reverse, i,
-                        bio::Codec::to_string(a), bio::Codec::to_string(b));
+                        bio::Codec::to_string(a), 
+                        bio::Codec::to_string(b));
           print_path();
           return false;
         }
@@ -517,7 +390,6 @@ struct ReadGraph {
     };
     assert(valid_path<Reverse>(path));
 
-    // TODO: segmentation fault here, check
     for (auto i = 0u; i < path.size(); i++) {
       if (i && path[i].second > 2 * path[i - 1].second) {
         // spdlog::debug("Found branch point at {}, i = {}",
@@ -621,7 +493,6 @@ struct ReadGraph {
       }
 
       path.emplace_back(v, w);
-      // TODO: remove the check of valid_path
       if (need_pop) {
         assert(valid_path<Reverse>(path));
       }
@@ -642,6 +513,7 @@ struct ReadGraph {
         } else {
           u = g.source(e);
         }
+        // edge_weights[i] = g[e].count / std::max(1ul, vis[u]);
         edge_weights[i] = g[e].count / (vis[u] + 1);
         edge_weight_sum += edge_weights[i];
         i += 1;
@@ -708,18 +580,17 @@ struct ReadGraph {
    * @param kmer_size The size of the k-mer.
    * @param max_assemble_len The maximum length for assembly.
    */
-  ReadGraph(const std::size_t kmer_size, const std::size_t max_assemble_len) {
+  TestGraph(const std::size_t kmer_size, const std::size_t max_assemble_len) {
     if (kmer_size > MAX_KMER_SIZE) {
       spdlog::warn("kmer_size should be less than {}", MAX_KMER_SIZE);
       this->kmer_size = MAX_KMER_SIZE;
     } else {
       this->kmer_size = kmer_size;
     }
-    this->used_bytes =
-        (kmer_size + BASES_PER_BYTE_UNIT - 1) / BASES_PER_BYTE_UNIT;
+    this->used_bytes = (kmer_size + BASES_PER_BYTE_UNIT - 1) / BASES_PER_BYTE_UNIT;
     this->shift_at_last_unit = (kmer_size - 1) % BASES_PER_BYTE_UNIT * 2;
     this->max_assemble_len = max_assemble_len;
-    this->kmers.reserve(this->max_assemble_len * 2);
+    this->kmer_to_vertex.reserve(this->max_assemble_len * 2);
   }
 
   auto get_kmer_size() const { return kmer_size; }
@@ -768,7 +639,8 @@ struct ReadGraph {
     auto kmer = Kmer{};
     for (auto i = 0u; i < kmer_size; i += BASES_PER_BYTE_UNIT) {
       auto subseq = seq.substr(i, BASES_PER_BYTE_UNIT);
-      auto data = encode_seq_to_unit(subseq);
+      auto data = encode_seq_to_unit(seq.substr(i, BASES_PER_BYTE_UNIT));
+      // spdlog::debug("encode {} to {}", bio::Codec::to_string(subseq), pretty_print(data));
       kmer[i / BASES_PER_BYTE_UNIT] = data;
     }
     // spdlog::debug("kmer = {}", pretty_print(kmer));
@@ -790,19 +662,19 @@ struct ReadGraph {
 
   /**
    * @brief Shifts the given Kmer and appends the specified base.
-   *
+   * 
    * @param kmer The Kmer to be shifted and appended.
    * @param base The base to be appended to the Kmer.
    * @return The updated Kmer after shifting and appending the base.
    */
-  auto shift_kmer_and_append_base(Kmer kmer, const ByteUnit base) {
+  auto shift_and_append(Kmer kmer, const ByteUnit base) {
     for (auto i = 0u; i < used_bytes; i++) {
       kmer[i] = kmer[i] >> 2;
       if (i + 1 < used_bytes) {
         kmer[i] |= (kmer[i + 1] & 0b11) << ((BASES_PER_BYTE_UNIT - 1) * 2);
       } else {
         kmer[i] |= base << shift_at_last_unit;
-      }
+      } 
     }
     return kmer;
   }
@@ -815,53 +687,36 @@ struct ReadGraph {
     auto prev_kmer = encode_seq_to_kmer(sequence.substr(0, kmer_size));
     auto prev_vertex = get_vertex(prev_kmer);
 
+
     // don't use `prev_kmer`! we use Kmer.data() for comparing
     // if we use `prev_kmer` directly, then we need to change compare criteria
     // set_kmer_pos(g[prev_kmer].kmer, 0);
-    add_appearance_to_vertex(prev_vertex, 0 + left_bound);
+    add_pos_to_vertex(prev_vertex, 0 + left_bound);
+    
     for (auto i = 1u; i + kmer_size <= sequence.size(); i++) {
-      auto now_kmer =
-          shift_kmer_and_append_base(prev_kmer, sequence[i + kmer_size - 1]);
+      auto now_kmer = shift_and_append(prev_kmer, sequence[i + kmer_size - 1]);
       assert(decode_kmer_to_seq(now_kmer) == sequence.substr(i, kmer_size));
       auto now_vertex = get_vertex(now_kmer);
-      add_appearance_to_vertex(now_vertex, i + left_bound);
+      add_pos_to_vertex(now_vertex, i + left_bound);
       increase_edge_weight(prev_vertex, now_vertex);
       prev_vertex = now_vertex;
       prev_kmer = now_kmer;
     }
   }
 
-  /**
-   * Determines if the given sequence is a source node in the graph.
-   *
-   * @param seq The sequence to check.
-   * @param weight_threshold The weight threshold for considering a node as a
-   * source.
-   * @return True if the sequence is a source node, false otherwise.
-   */
+  
   auto is_source(bio::istring_view seq, const std::size_t weight_threshold) {
     if (seq.size() != kmer_size) {
-      spdlog::warn("The size of the sequence should be {}, not {}", kmer_size,
-                   seq.size());
+      spdlog::warn("The size of the sequence should be {}, not {}", kmer_size, seq.size());
       return false;
     }
     auto kmer = encode_seq_to_kmer(seq);
     return is_source(kmer, weight_threshold);
   }
 
-  /**
-   * Determines if a given sequence is a sink in the graph.
-   * A sink is a node in the graph that has no outgoing edges.
-   *
-   * @param seq The sequence to check.
-   * @param weight_threshold The weight threshold for considering a node as a
-   * sink.
-   * @return True if the sequence is a sink, false otherwise.
-   */
   auto is_sink(bio::istring_view seq, const std::size_t weight_threshold) {
     if (seq.size() != kmer_size) {
-      spdlog::warn("The size of the sequence should be {}, not {}", kmer_size,
-                   seq.size());
+      spdlog::warn("The size of the sequence should be {}, not {}", kmer_size, seq.size());
       return false;
     }
     auto kmer = encode_seq_to_kmer(seq);
@@ -869,19 +724,46 @@ struct ReadGraph {
   }
 
   /**
-   * @brief Retrieves the sources in the graph within a specified range and
-   * weight threshold.
-   *
-   * @param start The starting index of the range.
-   * @param end The ending index of the range.
-   * @param weight_threshold The weight threshold for filtering the sources.
-   * @return A vector containing the filtered and sorted sources.
+   * @brief add one sequence to the graph
+   * @param sequence the sequence to be added
+   * @param left_bound the left boundary of the sequence in the read
    */
+  // auto add_seq(const std::string& sequence, const std::size_t left_bound) {
+  //   if (sequence.size() < kmer_size) {
+  //     return;
+  //   }
+
+  //   auto update_appearance = [&](KmerView kmer, const std::size_t pos) {
+  //     kmer_appearances[kmer].insert(pos + left_bound);
+  //   };
+
+  //   auto prev_vertex = get_vertex(sequence.substr(0, kmer_size));
+  //   update_appearance(prev_vertex, 0);
+  //   for (auto i = 1u; i + kmer_size <= sequence.size(); i++) {
+  //     bool found = false;
+  //     for (const auto& edge : g.out_edges(prev_vertex, false)) {
+  //       const auto u = g.target(edge);
+  //       if (g[u].kmer.back() == sequence[i + kmer_size - 1]) {
+  //         g[edge].count += 1;
+  //         update_appearance(u, i);
+  //         prev_vertex = u;
+  //         found = true;
+  //         break;
+  //       }
+  //     }
+  //     if (!found) {
+  //       const auto v = get_vertex(sequence.substr(i, kmer_size));
+  //       update_appearance(v, i);
+  //       create_edge(prev_vertex, v);
+  //       prev_vertex = v;
+  //     }
+  //   }
+  // }
+
   auto get_sources(const std::size_t start, const std::size_t end,
                    const std::size_t weight_threshold) {
-    auto candidate_sources = find_vertexes_in_range(start, end);
-    // spdlog::debug("Find Sources({} - {}) using weight = {}: candidate.size()
-    // = {}", start, end, weight_threshold,
+    auto candidate_sources = get_vertex_inside_range(start, end);
+    // spdlog::debug("Find Sources({} - {}) using weight = {}: candidate.size() = {}", start, end, weight_threshold,
     //               candidate_sources.size());
     auto sources = std::vector<Vertex>{};
     std::ranges::copy_if(candidate_sources, std::back_inserter(sources),
@@ -889,34 +771,32 @@ struct ReadGraph {
       return is_source(v, weight_threshold);
     });
     std::ranges::sort(sources, [this](const auto& a, const auto& b) {
-      const auto a_diff = g[a].appearances_diff();
-      const auto b_diff = g[b].appearances_diff();
+      const auto& a_appearances = g[a].appearances;
+      const auto& b_appearances = g[b].appearances;
+      assert(a_appearances.size() > 0 && b_appearances.size() > 0);
+      
+      const auto a_first_pos = *a_appearances.begin();
+      const auto a_last_pos = *a_appearances.rbegin();
+      const auto b_first_pos = *b_appearances.begin();
+      const auto b_last_pos = *b_appearances.rbegin();
+      
+      const auto a_diff = a_last_pos - a_first_pos;
+      const auto b_diff = b_last_pos - b_first_pos;
       if (a_diff != b_diff) {
         return a_diff < b_diff;
       }
-      return g[a].first_appearance() < g[b].first_appearance();
-      // auto [a_first_pos, a_last_pos] = g[a].appearances_range();
-      // auto [b_first_pos, b_last_pos] = g[b].appearances_range();
-      // return std::make_pair(a_last_pos, a_first_pos) <
-      //        std::make_pair(b_last_pos, b_first_pos);
+      if (a_last_pos != b_last_pos) {
+        return a_last_pos < b_last_pos;
+      }
+      return b_first_pos > a_first_pos;
     });
     return sources;
   }
 
-  /**
-   * @brief Retrieves the sinks in the graph within a specified range, based on
-   * a weight threshold.
-   *
-   * @param start The starting index of the range.
-   * @param end The ending index of the range.
-   * @param weight_threshold The weight threshold for determining sinks.
-   * @return std::vector<Vertex> The sinks found within the specified range.
-   */
   auto get_sinks(const std::size_t start, const std::size_t end,
                  const std::size_t weight_threshold) {
-    auto candidate_sinks = find_vertexes_in_range(start, end);
-    // spdlog::debug("Find Sinks({} - {}) using weight = {}: candidate.size() =
-    // {}", start, end, weight_threshold,
+    auto candidate_sinks = get_vertex_inside_range(start, end);
+    // spdlog::debug("Find Sinks({} - {}) using weight = {}: candidate.size() = {}", start, end, weight_threshold,
     //               candidate_sinks.size());
     auto sinks = std::vector<Vertex>{};
     std::ranges::copy_if(candidate_sinks, std::back_inserter(sinks),
@@ -924,16 +804,24 @@ struct ReadGraph {
       return is_sink(v, weight_threshold);
     });
     std::ranges::sort(sinks, [this](const auto& a, const auto& b) {
-      const auto a_diff = g[a].appearances_diff();
-      const auto b_diff = g[b].appearances_diff();
+      const auto& a_appearances = g[a].appearances;
+      const auto& b_appearances = g[b].appearances;
+      assert(a_appearances.size() > 0 && b_appearances.size() > 0);
+
+      const auto a_first_pos = *a_appearances.begin();
+      const auto a_last_pos = *a_appearances.rbegin();
+      const auto b_first_pos = *b_appearances.begin();
+      const auto b_last_pos = *b_appearances.rbegin();
+
+      const auto a_diff = a_last_pos - a_first_pos;
+      const auto b_diff = b_last_pos - b_first_pos;
       if (a_diff != b_diff) {
         return a_diff < b_diff;
       }
-      return g[a].last_appearance() > g[b].last_appearance();
-      // const auto [a_first_pos, a_last_pos] = g[a].appearances_range();
-      // const auto [b_first_pos, b_last_pos] = g[b].appearances_range();
-      // return std::make_pair(a_last_pos, a_first_pos) <
-      //        std::make_pair(b_last_pos, b_first_pos);
+      if (a_first_pos != b_first_pos) {
+        return a_first_pos > b_first_pos;
+      }
+      return a_last_pos < b_last_pos;
     });
     return sinks;
   }
@@ -955,6 +843,8 @@ struct ReadGraph {
     //               *g[source].appearances.rbegin(), g[sink].kmer,
     //               *g[sink].appearances.begin(),
     //               *g[sink].appearances.rbegin());
+
+    set_vertex_index();
 
     /* reset max_path */
     max_path_size = 0;
@@ -1235,11 +1125,13 @@ struct ReadGraph {
 
   auto print() {
     spdlog::debug("There are {} vertices.", g.vertices().size());
-    auto start_addr = fmt::ptr(kmers.front().data());
-    auto end_addr = fmt::ptr(kmers.back().data());
+    spdlog::debug("There are {} kmers", kmer_to_vertex.size());
+    auto start_addr = fmt::ptr(kmer_to_vertex.begin()->first.data());
+    auto end_addr = fmt::ptr(kmer_to_vertex.rbegin()->first.data());
     spdlog::debug("Kmer start at {} and end at {}", start_addr, end_addr);
-    spdlog::debug("sz = {:.3f} MB",
-                  ((double) kmers.size() * sizeof(Kmer) / 1024 / 1024));
+    spdlog::debug("Capacity = {}, size = {}", kmer_to_vertex.capacity(),
+                  kmer_to_vertex.size());
+    spdlog::debug("sz = {:.3f} MB", ((double) kmer_to_vertex.capacity() * sizeof(Kmer) / 1024 / 1024));
 
     // spdlog::debug("Size in memory = {}", sizeof(*this));
   }
@@ -1270,7 +1162,6 @@ struct ReadGraph {
   std::size_t max_path_size;
 
   /* each kmer and its vertex */
-  std::vector<Kmer> kmers;
   KmerMap<Vertex> kmer_to_vertex;
 
   // debug

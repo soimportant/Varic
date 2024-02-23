@@ -7,3 +7,12 @@
 [submodule "submodules/gperftools"]
 	path = submodules/gperftools
 	url = https://github.com/gperftools/gperftools
+[submodule "submodules/indicators"]
+	path = submodules/indicators
+	url = https://github.com/p-ranav/indicators
+[submodule "tools/simulator/pbsim3"]
+	path = tools/simulator/pbsim3
+	url = https://github.com/yukiteruono/pbsim3
+[submodule "tools/simulator/simuG"]
+	path = tools/simulator/simuG
+	url = https://github.com/yjx1217/simuG

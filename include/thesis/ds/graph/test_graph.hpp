@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <array>
+#include <biovoltron/algo/assemble/graph/graph_wrapper.hpp>
+#include <boost/container/flat_map.hpp>
+#include <boost/graph/graphviz.hpp>
 #include <cstddef>
 #include <map>
 #include <numeric>
@@ -13,11 +16,6 @@
 #include <string_view>
 #include <vector>
 
-#include <biovoltron/algo/assemble/graph/graph_wrapper.hpp>
-#include <boost/container/flat_map.hpp>
-#include <boost/graph/graphviz.hpp>
-#include <boost/asio/thread_pool.hpp>
-
 namespace bio = biovoltron;
 namespace fs = std::filesystem;
 
@@ -28,7 +26,7 @@ constexpr static auto BASES_PER_BYTE_UNIT = BASES_PER_BYTE * sizeof(ByteUnit);
 constexpr static auto MAX_SPAN_LENGTH = 2u;
 constexpr static auto MAX_KMER_SIZE = BASES_PER_BYTE_UNIT * MAX_SPAN_LENGTH;
 
-struct ReadGraph {
+struct TestGraph {
  public:
   struct Param {
     /* For global assmebling */
@@ -359,11 +357,9 @@ struct ReadGraph {
     return bio::Codec::to_string(read);
   }
 
-
   // TODO: extend source and sink
   template <bool Reverse = false>
   auto extend_path_at_end(Path& path) {}
-
 
   /* do local assemble between source and sink */
   template <bool Reverse = false>
@@ -414,19 +410,12 @@ struct ReadGraph {
     auto vis = std::set<Vertex>{};
     dfs(dfs, source, path, vis);
     // sort the paths by average weight
-    // TODO: may segfault on Ofast flag enabled 
     std::ranges::sort(paths, [](const auto& a, const auto& b) {
       auto cal_sum = [](const auto& path) {
-        assert(path.size() != 0);
-        auto sum = 0.0;
-        for (auto [v, w] : path) {
-          sum += w;
-        }
-        return sum;
+        return std::accumulate(
+            path.begin(), path.end(), 0.0,
+            [](const auto& a, const auto& b) { return a + b.second; });
       };
-      if (a.size() == 0 || b.size() == 0) {
-        spdlog::warn("The path size should not be 0!!!");
-      }
       return cal_sum(a) / a.size() > cal_sum(b) / b.size();
     });
     // spdlog::debug("There are {} paths.", paths.size());
@@ -517,7 +506,6 @@ struct ReadGraph {
     };
     assert(valid_path<Reverse>(path));
 
-    // TODO: segmentation fault here, check
     for (auto i = 0u; i < path.size(); i++) {
       if (i && path[i].second > 2 * path[i - 1].second) {
         // spdlog::debug("Found branch point at {}, i = {}",
@@ -708,7 +696,7 @@ struct ReadGraph {
    * @param kmer_size The size of the k-mer.
    * @param max_assemble_len The maximum length for assembly.
    */
-  ReadGraph(const std::size_t kmer_size, const std::size_t max_assemble_len) {
+  TestGraph(const std::size_t kmer_size, const std::size_t max_assemble_len) {
     if (kmer_size > MAX_KMER_SIZE) {
       spdlog::warn("kmer_size should be less than {}", MAX_KMER_SIZE);
       this->kmer_size = MAX_KMER_SIZE;

@@ -1,9 +1,11 @@
 #pragma once
 
-#include "thesis/corrector/detail/sequence.hpp"
-#include "thesis/ds/graph/read_graph.hpp"
 #include <cmath>
 #include <string_view>
+
+#include "thesis/corrector/detail/sequence.hpp"
+#include "thesis/ds/graph/read_graph.hpp"
+
 
 class ReadAssembler {
 
@@ -17,30 +19,26 @@ class ReadAssembler {
 
   struct Param {
 
-    /**
-     * The parameter that used on finding source and sink
-     * at both ends of the read
-     */
 
-    /* The incraseing ratio of searching length related to `read_len` on both
-     * end */
+    /**
+     * Parameters that used on identifying source and sink
+     */
+    // The ratio of searching length related to `read_len` on both end
     const double INCREASE_END_LEN_RATIO = 0.02;
 
-    /* The maximum searching length ratio, stop searching when reaching this
-     * value */
+    // The maximum searching length ratio
     const double MAX_END_LEN_RATIO = 0.12;
 
-    /* Maximum occurances at searching source and sink, *User parameter* */
+    // Maximum occurances at searching source and sink, *User parameter*
     const std::size_t MAX_END_OCC = 6ul;
-    const std::size_t MIN_END_OCC = 2ul;
+    const std::size_t MIN_END_OCC = 3ul;
 
     /**
      * The parameter that used on assembing corrected read
      */
-
-    /* The maximum number of iterations */
+    // The maximum number of iterations
     const std::size_t MAX_ITERATIONS = 4ul;
-    /* The number of kmer size increase when assemble failed */
+    // The number of kmer size increase when assemble failed
     const std::size_t INCREASE_KMER_SIZE = 5ul;
 
     /**
@@ -48,8 +46,9 @@ class ReadAssembler {
      */
     const double ASSEMBLE_FAILED_RATIO = 0.1;
     const double ASSEMBLE_TOO_SHORT_RATIO = 0.9;
-    const double ASSEMBLE_MAX_LEN_RATIO = 1.05;
+    const double ASSEMBLE_MAX_LEN_RATIO = 1;
   } param;
+
 
   /**
    * Identifies the source vertices in the given ReadGraph based on the
@@ -139,8 +138,9 @@ class ReadAssembler {
    * read could be assembled.
    */
   auto assemble_read(const std::size_t kmer_size) {
+    
     auto graph = ReadGraph(kmer_size, read_len * param.ASSEMBLE_MAX_LEN_RATIO);
-    for (const auto &seq : seqs) {
+    for (const auto &seq : sequences) {
       graph.add_seq(seq.seq, seq.left_bound);
     }
     auto sources = identify_source_from_graph(graph);
@@ -211,36 +211,30 @@ public:
   /* move constructor */
   ReadAssembler(ReadAssembler &&rhs) {
     read_len = rhs.read_len;
-    seqs = std::move(rhs.seqs);
+    sequences = std::move(rhs.sequences);
   }
 
   /* move assignment */
   ReadAssembler &operator=(ReadAssembler &&rhs) {
     read_len = rhs.read_len;
-    seqs = std::move(rhs.seqs);
+    sequences = std::move(rhs.sequences);
     return *this;
   }
 
-  auto add_seq(Sequence<std::string> seq) { seqs.emplace_back(std::move(seq)); }
-
-  auto add_seq(const std::string_view sequence, const std::size_t left_bound,
-               const std::size_t right_bound) {
-    // seqs.emplace_back(Sequence<std::string>{
-    //     .read_id = -1,
-    //     .left_bound = left_bound,
-    //     .right_bound = right_bound,
-    //     .seq = std::string(sequence),
-    //     .qual = std::nullopt,
-    //     .forward_strain = true,
-    // });
-    seqs.emplace_back(Sequence<std::string>{
-        -1,                    // read_id
-        left_bound,            // left_bound
-        right_bound,           // right_bound
-        std::string(sequence), // seq
-        std::nullopt,          // qual
-        true                   // forward_strain
-    });
+  template<class T>
+  auto add_seq(const Sequence<T>& seq) {
+    if constexpr (std::is_same_v<T, bio::istring>) {
+      sequences.push_back(seq);
+    } else {
+      sequences.emplace_back(Sequence<bio::istring>{
+        seq.read_id, 
+        seq.left_bound, 
+        seq.right_bound, 
+        bio::Codec::to_istring(seq.seq),
+        seq.qual,
+        seq.forward_strain
+      });
+    }
   }
 
   auto assemble() {
@@ -333,9 +327,9 @@ public:
     // return std::string{};
   }
 
-  auto clear() { seqs.clear(); }
+  auto clear() { sequences.clear(); }
 
 private:
   std::size_t read_len;
-  std::vector<Sequence<std::string>> seqs;
+  std::vector<Sequence<bio::istring>> sequences;
 };
