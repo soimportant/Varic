@@ -1,10 +1,11 @@
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 
-#include <boost/program_options.hpp>
 #include <omp.h>
-#include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
+#include <spdlog/spdlog.h>
+#include <boost/program_options.hpp>
 #include <spoa/spoa.hpp>
 
 #include "thesis/corrector/fragmented_corrector.hpp"
@@ -30,8 +31,9 @@ void exit_and_print_help(T msg = ""s) {
 auto make_path_checker(const std::string& opt_name) {
   return [opt_name](const fs::path& p) {
     if (!fs::exists(p)) {
+      spdlog::error("{} does not exist", p.string());
       throw bpo::validation_error(bpo::validation_error::invalid_option_value,
-                                  opt_name, p);
+                                  opt_name);
     }
   };
 };
@@ -52,13 +54,34 @@ auto check_argument(const bpo::variables_map& vmap) {
   }
   /* check platform */
   auto platform = vmap["platform"].as<std::string>();
-  if (platform != "PacBio" && platform != "ONT") {
+  if (platform.find("PacBio") == std::string::npos &&
+      platform.find("ONT") == std::string::npos) {
     spdlog::error("Platform must be PacBio or ONT");
     exit(1);
   }
   auto thread = vmap["thread"].as<int>();
   if (thread < 1) {
     spdlog::error("Thread must be greater than 0");
+    exit(1);
+  }
+  auto match = vmap["match"].as<int>();
+  auto mismatch = vmap["mismatch"].as<int>();
+  auto gap = vmap["gap"].as<int>();
+  auto extend = vmap["extend"].as<int>();
+  if (match < 1) {
+    spdlog::error("Match must be greater than 0");
+    exit(1);
+  }
+  if (mismatch > 0) {
+    spdlog::error("Mismatch must be less than 0");
+    exit(1);
+  }
+  if (gap > 0) {
+    spdlog::error("Gap must be less than 0");
+    exit(1);
+  }
+  if (extend > 0) {
+    spdlog::error("Extend must be less than 0");
     exit(1);
   }
 }
@@ -70,28 +93,63 @@ int main(int argc, char* argv[]) {
    * 3. output path
    * 4. sequencing platform
    */
-  
+
   auto start = std::chrono::steady_clock::now();
-  
+
   bpo::options_description opts{};
   bpo::variables_map vmap;
   try {
-    opts.add_options()("help,h", "Show help message")(
-        "raw_read,r",
-        bpo::value<fs::path>()->required()->notifier(
-            make_path_checker("raw_read")),
-        "path to TGS raw reads")(
-        "overlap_info,c",
-        bpo::value<fs::path>()->required()->notifier(
-            make_path_checker("overlap_info")),
-        "path to the overlap information of raw reads(.paf)")(
-        "output_path,o", bpo::value<fs::path>()->required(),
-        "the output path of corrected read")(
-        "platform,p", bpo::value<std::string>(),
-        "the sequencing platform of raw reads, must be \"ONT\" or \"PacBio\"")(
-        "thread,t", bpo::value<int>()->default_value(1),
-        "the maximum number of threads")(
-        "debug", bpo::bool_switch()->default_value(false), "enable debug mode");
+    opts.add_options()("help,h", "Show help message")
+        // raw reads
+        ("raw_read,r",
+         bpo::value<fs::path>()->required()->notifier(
+             make_path_checker("raw_read")),
+         "The path to TGS raw reads")
+        // overlap information
+        ("overlap_info,c",
+         bpo::value<fs::path>()->required()->notifier(
+             make_path_checker("overlap_info")),
+         "The path to the overlap information of raw reads(.paf)")
+        // output path of corrected read
+        ("output_path,o", bpo::value<fs::path>()->required(),
+         "The output path of corrected read")
+        // sequencing platform
+        ("platform,p", bpo::value<std::string>(),
+         "The sequencing platform of raw reads, must be \"ONT\" or \"PacBio\"")
+        // Max used threads
+        ("thread,t", bpo::value<int>()->default_value(1),
+         "The maximum number of threads")
+        // match score
+        ("match", bpo::value<int>()->default_value(5),
+         "The match score in alignment")
+        // mismatch score
+        ("mismatch", bpo::value<int>()->default_value(-4),
+         "The mismatch score in alignment")
+        // gap score
+        ("gap", bpo::value<int>()->default_value(-8),
+         "The gap score in alignment")
+        // gap extension score
+        ("extend", bpo::value<int>()->default_value(-6),
+         "The gap extension score in alignment")
+        // graph pruning threshold
+        ("prune", bpo::value<double>()->default_value(0.95),
+         "The prune threshold for the variation graph, this value should set "
+         "between 0 and 1. The higher the value, the pruned graph will be more "
+         "aggressive. If your data is noisy, which means has more haplotypes "
+         "inside it, you should set this value higher")
+        // maximum depth inside a window
+        ("depth,d", bpo::value<int>()->default_value(-1),
+         "The maximum sequence to be used when building variation graph of a "
+         "window, -1 means take all sequences. This will be used to reduce the "
+         "run-time of the program, but will effect the accuracy of the result.")
+        // seed for random number generator
+        ("seed", bpo::value<std::int64_t>()->default_value(std::chrono::steady_clock::now().time_since_epoch().count()),
+         "The seed for random number generator")
+        ("quiet,q", bpo::bool_switch()->default_value(false),
+         "disable all log")
+        // debug flag
+        ("debug", bpo::bool_switch()->default_value(false),
+         "enable debug mode (print verbose log to stderr)");
     bpo::store(bpo::parse_command_line(argc, argv, opts), vmap);
     bpo::notify(vmap);
     if (vmap.contains("help")) {
@@ -109,6 +167,19 @@ int main(int argc, char* argv[]) {
   auto platform = vmap["platform"].as<std::string>();
 
   auto debug_mode = vmap["debug"].as<bool>();
+  auto thread = vmap["thread"].as<int>();
+
+  auto match = vmap["match"].as<int>();
+  auto mismatch = vmap["mismatch"].as<int>();
+  auto gap = vmap["gap"].as<int>();
+  auto extend = vmap["extend"].as<int>();
+
+  auto depth = vmap["depth"].as<int>();
+  auto prune_ratio = vmap["prune"].as<double>();
+
+  auto seed = vmap["seed"].as<std::int64_t>();
+  auto quiet = vmap["quiet"].as<bool>();
+
   if (debug_mode) {
     auto logger = spdlog::stderr_color_mt("logger");
     spdlog::set_default_logger(logger);
@@ -116,25 +187,24 @@ int main(int argc, char* argv[]) {
   } else {
     spdlog::set_level(spdlog::level::info);
   }
-  auto thread = vmap["thread"].as<int>();
   omp_set_num_threads(thread);
 
   auto overlap = read_records<bio::PafRecord>(overlap_path);
   auto call_corrector = [&]<class R>() {
     auto raw_reads = read_records<R>(reads_path);
-    auto correcter = FragmentedReadCorrector<R>(std::move(raw_reads),
-                                                std::move(overlap), platform,
-                                                thread, debug_mode);
-    auto corrected_read = correcter.correct();
+    auto corrector = FragmentedReadCorrector<R>(
+        std::move(raw_reads), std::move(overlap), platform, thread, depth, prune_ratio, seed);
+    corrector.set_alignment_params(match, mismatch, gap, extend);
+    auto corrected_read = corrector.correct();
     return corrected_read;
   };
 
   auto corrected_read = std::vector<bio::FastaRecord<false>>{};
   if (parse_file_format(reads_path) == FILE_FORMAT::FASTA) {
-    // auto corrected_read = call_corrector.operator()<bio::FastaRecord<false>>();
+    corrected_read = call_corrector.operator()<bio::FastaRecord<false>>();
   } else {
     corrected_read = call_corrector.operator()<bio::FastqRecord<false>>();
-  }  
+  }
   auto end = std::chrono::steady_clock::now();
 
   spdlog::info(
@@ -142,8 +212,8 @@ int main(int argc, char* argv[]) {
       std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
           .count());
 
-  // auto fout = std::ofstream(output_path, std::ios::out);
-  // for (auto& r : corrected_read) {
-  //   fout << r << std::endl;
-  // }
+  auto fout = std::ofstream(output_path, std::ios::out);
+  for (auto& r : corrected_read) {
+    fout << r << std::endl;
+  }
 }

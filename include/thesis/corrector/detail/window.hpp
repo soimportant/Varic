@@ -9,6 +9,7 @@
 #include <vector>
 #include <chrono>
 #include <random>
+#include <ranges>
 
 #include <biovoltron/utility/istring.hpp>
 #include <spoa/spoa.hpp>
@@ -90,20 +91,26 @@ class Window {
    * @param end_ end position of this window on raw read sequence
    */
   Window(const std::size_t read_id_, const std::size_t idx_,
-         const std::size_t start_, const std::size_t end_) {
+         const std::size_t start_, const std::size_t end_,
+         const std::int64_t seed) {
     read_id = read_id_;
     idx = idx_;
     start = start_;
     end = end_;
+    random_engine.seed(seed);
   }
 
   struct Param {
+
+    const double SHORT_SEQ_RATIO = 0.02;
+
     /**
      * The length of longest path in pruned graph must greater than this value *
      * len()
      */
-    const double PRUNE_LEN_RATIO = 0.95;
+    double PRUNE_LEN_RATIO = 0.95;
   } param;
+
 
   /**
    * @brief return the length of this window
@@ -111,6 +118,7 @@ class Window {
    * @return std::size_t
    */
   auto len() const noexcept { return end - start; }
+
 
   /**
    * @brief extend `start` and `end` by `window_overlap_len` on both side
@@ -121,7 +129,18 @@ class Window {
     end = std::min(end + extend_len, max_len);
   }
 
-  auto add_sequence(Sequence<> seq,
+  
+  /**
+   * @brief Returns the depth of the window.
+   * 
+   * The depth of the window is equal to the number of overlap sequences it contains.
+   * 
+   * @return The depth of the window.
+   */
+  auto depth() const noexcept { return overlap_seqs.size(); }
+
+
+  auto add_sequence(Sequence<>&& seq,
                     const std::pair<std::size_t, std::size_t>& match_pos) {
     if (match_pos.first == match_pos.second || seq.len() == 0) {
       return;
@@ -131,10 +150,38 @@ class Window {
     match_pos_at_query.emplace_back(match_pos);
   }
 
+
+  auto get_order() noexcept {
+    auto order = std::vector<std::size_t>(overlap_seqs.size());
+    std::iota(order.begin(), order.end(), 0);
+
+    /* seperate full-length sequence and short sequence */
+    std::ranges::sort(order, [&](int a, int b) {
+      auto a_len = match_pos_at_query[a].second - match_pos_at_query[a].first;
+      auto b_len = match_pos_at_query[b].second - match_pos_at_query[b].first;
+      return a_len > b_len;
+    });
+
+    /* find the seperate point */
+    auto sep = std::ranges::find_if(order, [&](int x) {
+      auto diff = match_pos_at_query[x].second - match_pos_at_query[x].first;
+      return diff < len() * param.SHORT_SEQ_RATIO;
+    });
+
+    /* random shuffle two part */
+    std::shuffle(order.begin(), sep, random_engine);
+    std::shuffle(sep, order.end(), random_engine);
+
+    return order;
+  }
+
+
   auto build_variation_graph(
     const std::unique_ptr<spoa::AlignmentEngine>& global_aln_engine,
-    const std::unique_ptr<spoa::AlignmentEngine>& local_aln_engine) {
+    const std::unique_ptr<spoa::AlignmentEngine>& local_aln_engine,
+    const int depth = -1) {
     auto graph = spoa::Graph{};
+
     auto align_and_push = [&](const auto& seq, const auto& qual, const auto& match_pos) {
       const auto [q_match_st, q_match_ed] = match_pos;
       const auto use_local_aln_ratio = 0.02;
@@ -156,22 +203,31 @@ class Window {
     };
 
 
-    /* TODO: the order is used by vechat, but can try it randomly */
-    auto order = std::vector<std::size_t>(overlap_seqs.size());
-    std::iota(order.begin(), order.end(), 0);
-    // sort(order.begin(), order.end(), [&](int a, int b) {
-    //   return match_pos_at_query[a].first < match_pos_at_query[b].first;
-    // });
-    std::shuffle(order.begin(), order.end(), std::mt19937{std::random_device{}()});
     align_and_push(backbone.seq, backbone.qual, std::make_pair(0, len()));
-    for (const auto& x : order) {
+    auto order = get_order();
+    for (const auto& x : order | std::views::take(depth)) {
       align_and_push(overlap_seqs[x].seq, overlap_seqs[x].qual,
                      match_pos_at_query[x]);
     }
     graph = graph.PruneGraph(len() * param.PRUNE_LEN_RATIO);
-    // graph = graph.PruneGraph(len());
-
     return graph;
+
+    
+    // auto order = std::vector<std::size_t>(overlap_seqs.size());
+    // std::iota(order.begin(), order.end(), 0);
+    // // sort(order.begin(), order.end(), [&](int a, int b) {
+    // //   return match_pos_at_query[a].first < match_pos_at_query[b].first;
+    // // });
+    // std::shuffle(order.begin(), order.end(), std::mt19937{std::random_device{}()});
+    // align_and_push(backbone.seq, backbone.qual, std::make_pair(0, len()));
+    // for (const auto& x : order) {
+    //   align_and_push(overlap_seqs[x].seq, overlap_seqs[x].qual,
+    //                  match_pos_at_query[x]);
+    // }
+    // graph = graph.PruneGraph(len() * param.PRUNE_LEN_RATIO);
+    // // graph = graph.PruneGraph(len());
+
+    // return graph;
 
     // if (read_id < 10) {
     //   auto path =
@@ -193,9 +249,16 @@ class Window {
 
   auto get_corrected_fragments(
       const std::unique_ptr<spoa::AlignmentEngine>& global_aln_engine,
-      const std::unique_ptr<spoa::AlignmentEngine>& local_aln_engine) {
+      const std::unique_ptr<spoa::AlignmentEngine>& local_aln_engine,
+      const std::vector<bool> mask,
+      const int depth = -1) {
     assert(global_aln_engine != nullptr && local_aln_engine != nullptr);
-    auto graph = build_variation_graph(global_aln_engine, local_aln_engine);
+
+    if (std::ranges::count(mask, true) == 0) {
+      return std::vector<Sequence<std::string>>{};
+    }
+
+    auto graph = build_variation_graph(global_aln_engine, local_aln_engine, depth);
 
     auto get_corrected_fragment = [&](const Sequence<>& seq) {
       // spoa::Alignment -> std::pair<int, int>
@@ -207,35 +270,46 @@ class Window {
         aln = global_aln_engine->Align(seq.seq.data(), seq.seq.size(), graph);
       }
 
-      const auto head_not_align = std::ranges::distance(
-          aln.begin(), std::ranges::find(aln, -1, &std::pair<int, int>::first));
-      // std::ranges::find_last exists in C++23, hell C++ committee
-      const auto tail_not_align = std::ranges::distance(
-          aln.rbegin(), std::ranges::find(aln.rbegin(), aln.rend(), -1,
-                                          &std::pair<int, int>::first));
+      // const auto head_not_align = std::ranges::distance(
+      //     aln.begin(), std::ranges::find(aln, -1, &std::pair<int, int>::first));
+      // // std::ranges::find_last exists in C++23, hell C++ committee
+      // const auto tail_not_align = std::ranges::distance(
+      //     aln.rbegin(), std::ranges::find(aln.rbegin(), aln.rend(), -1,
+      //                                     &std::pair<int, int>::first));
       auto corrected_fragment = graph.DecodeAlignment(aln);
       if (seq.forward_strain == false) {
         corrected_fragment = bio::Codec::rev_comp(corrected_fragment);
       }
 
-      // TODO: left and right bound is not corrected
-      // (right - left + 1) should equal to ot at least close to
-      // corrected_fragment.size()
       return Sequence<std::string>{
           seq.read_id,                       // read_id
-          seq.left_bound + head_not_align,   // left_bound
-          seq.right_bound - tail_not_align,  // right_bound
+          seq.left_bound,                    // left_bound
+          seq.right_bound,                   // right_bound
           std::move(corrected_fragment),     // seq
           std::string{},                     // qual
           seq.forward_strain                 // forward_strain
       };
+
+      // TODO: left and right bound is not corrected
+      // (right - left + 1) should equal to ot at least close to
+      // corrected_fragment.size()
+      // return Sequence<std::string>{
+      //     seq.read_id,                       // read_id
+      //     seq.left_bound + head_not_align,   // left_bound
+      //     seq.right_bound - tail_not_align,  // right_bound
+      //     std::move(corrected_fragment),     // seq
+      //     std::string{},                     // qual
+      //     seq.forward_strain                 // forward_strain
+      // };
     };
 
     auto corrected_fragments = std::vector<Sequence<std::string>>{};
     corrected_fragments.reserve(overlap_seqs.size() + 1);
     corrected_fragments.emplace_back(get_corrected_fragment(backbone));
-    for (const auto& seq : overlap_seqs) {
-      corrected_fragments.emplace_back(get_corrected_fragment(seq));
+    for (auto i = 1; i < overlap_seqs.size(); ++i) {
+      if (mask[i]) {
+        corrected_fragments.emplace_back(get_corrected_fragment(overlap_seqs[i]));
+      }
     }
     return corrected_fragments;
   }
@@ -294,6 +368,8 @@ class Window {
   /* the sequences that overlap with backbone seq */
   std::vector<std::pair<std::size_t, std::size_t>> match_pos_at_query;
   std::vector<Sequence<>> overlap_seqs;
+
+  std::mt19937 random_engine;
 
   /* debug flag */
   bool debug = false;

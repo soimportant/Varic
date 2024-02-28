@@ -11,7 +11,7 @@ template <StringLike T = std::string_view>
 class Sequence {
  public:
   Sequence() = default;
-  Sequence(const std::size_t read_id, const std::size_t left_bound,
+  Sequence(const int read_id, const std::size_t left_bound,
            const std::size_t right_bound, T seq, std::optional<std::string_view> qual,
            const bool forward_strain)
       : read_id(read_id),
@@ -31,10 +31,12 @@ class Sequence {
 
   auto len() const noexcept { return seq.size(); }
 
+  auto empty() const noexcept { return seq.empty(); }
+
   ~Sequence() = default;
 
   /* the given id of read where the sequence come from */
-  std::size_t read_id;
+  int read_id;
 
   /* the left and right boundary of read */
   /* assert(right_bound - left_bound == seq.size() == qual.size()) */

@@ -375,6 +375,7 @@ struct ReadGraph {
     // 1. cycle
     // 2. the possibility of jumping to vertexes behind the sink
     //   - set a threshold of the path length
+
     auto paths = std::vector<Path>{};
     auto dfs = [&](auto&& self, const Vertex& now, Path& path,
                    std::set<Vertex>& vis) {
@@ -413,40 +414,26 @@ struct ReadGraph {
     auto path = Path{};
     auto vis = std::set<Vertex>{};
     dfs(dfs, source, path, vis);
+
+    assert(paths.size() != 0);
+
     // sort the paths by average weight
     // TODO: may segfault on Ofast flag enabled 
-    std::ranges::sort(paths, [](const auto& a, const auto& b) {
-      auto cal_sum = [](const auto& path) {
-        assert(path.size() != 0);
-        auto sum = 0.0;
-        for (auto [v, w] : path) {
-          sum += w;
-        }
-        return sum;
-      };
-      if (a.size() == 0 || b.size() == 0) {
-        spdlog::warn("The path size should not be 0!!!");
+    auto order = std::vector<std::size_t>(paths.size());
+    std::iota(order.begin(), order.end(), 0);
+    auto cal_path_sum = [](const auto& p) {
+      assert(path.size() != 0);
+      auto sum = 0.0;
+      for (const auto& [v, w] : p) {
+        sum += w;
       }
-      return cal_sum(a) / a.size() > cal_sum(b) / b.size();
+      return sum;
+    };
+    std::ranges::sort(order, [&](const auto& a, const auto& b) {
+      return cal_path_sum(paths[a]) / paths[a].size() >
+             cal_path_sum(paths[b]) / paths[b].size();
     });
-    // spdlog::debug("There are {} paths.", paths.size());
-    // for (auto& path : paths) {
-    // auto weight_sum = std::accumulate(
-    //     path.begin(), path.end(), 0.0,
-    //     [](const auto &a, const auto &b) { return a + b.second; });
-    // auto [mn, mx] = std::ranges::minmax_element(
-    //     path.begin(), path.end(),
-    //     [](const auto &a, const auto &b) { return a.second < b.second; });
-    // auto s = std::string{};
-    // for (auto [v, w] : path) {
-    //   s.push_back(g[v].kmer.back());
-    // }
-    // spdlog::debug("candidate({}, {}, {:.3f}): {}, ", mn->second,
-    // mx->second,
-    //               weight_sum / path.size(), s);
-    // }
-    assert(paths.size() > 0);
-    return paths[0];
+    return paths[order[0]];
   }
 
   template <bool Reverse = false>
@@ -507,9 +494,11 @@ struct ReadGraph {
 
     auto new_path = Path{};
     new_path.reserve(path.size());
-    auto find_previous_breakpoint = [&](const std::size_t weight) {
+
+    // find the previous branch point that weight is close enough to the current one
+    auto find_previous_branch_pos = [&](std::size_t weight) {
       for (auto i = (int) new_path.size() - 1; i >= 0; i--) {
-        if (new_path[i].second > weight) {
+        if (new_path[i].second > weight * param.LOCAL_ASSEMBLE_WEIGHT_RATIO) {
           return i;
         }
       }
@@ -517,62 +506,49 @@ struct ReadGraph {
     };
     assert(valid_path<Reverse>(path));
 
+    new_path.emplace_back(path[0]);
     // TODO: segmentation fault here, check
-    for (auto i = 0u; i < path.size(); i++) {
-      if (i && path[i].second > 2 * path[i - 1].second) {
-        // spdlog::debug("Found branch point at {}, i = {}",
-        // g[path[i].first].kmer, i);
-        auto prev_branch_pos = find_previous_breakpoint(
-            path[i].second * param.LOCAL_ASSEMBLE_WEIGHT_RATIO);
-        if (prev_branch_pos != -1) {
-          auto prev_branch_v = new_path[prev_branch_pos].first;
-          auto old_path_len = new_path.size() - prev_branch_pos;
-          if (old_path_len >= 2 * kmer_size) {
-            // the path is too long, so the reassembled process may take a lot
-            // time, skip it
-            new_path.emplace_back(path[i]);
-            continue;
-          }
-          auto now_branch_v = path[i].first;
-          // spdlog::debug("Found previous branch point at {}, len = {}",
-          //               g[prev_branch_v].kmer, old_path_len);
-          assert(valid_path<Reverse>(new_path));
-          // spdlog::debug("Found source point at {}, len = {}",
-          //               g[prev_branch_v].kmer, old_path_len);
-          auto reassembled_path = local_assemble<Reverse>(
-              prev_branch_v, now_branch_v,
-              old_path_len * param.LOCAL_ASSEMBLE_LENGTH_RATIO);
-          // spdlog::debug("Found sink point at {}, len = {}",
-          // g[now_branch_v].kmer,
-          //               reassembled_path.size());
-          // spdlog::debug("=========================\n\n");
-
-          /* Remove old path, add reassembled path */
-          while (new_path.size() != prev_branch_pos + 1) {
-            // spdlog::debug("pop {}", g[new_path.back().first].kmer);
-            new_path.pop_back();
-          }
-          std::ranges::copy(reassembled_path, std::back_inserter(new_path));
-          // for (auto [v, w] : reassembled_path) {
-          //   spdlog::debug("Re: v = {}, weight = {}", g[v].kmer, w);
-          // }
-          assert(valid_path<Reverse>(new_path));
-        } else {
-          // spdlog::debug("New source found, need extend it!");
-          new_path.clear();
-          new_path.emplace_back(path[i]);
-          // extend from source
-        }
-      } else {
+    for (auto i = 1u; i < path.size(); i++) {
+      if (path[i].second <= 2 * path[i - 1].second) {
         new_path.emplace_back(path[i]);
-        // spdlog::debug("push {}", g[path[i].first].kmer);
-        // spdlog::debug("new_path:");
-        // for (auto [v, w] : new_path | std::views::reverse |
-        // std::views::take(10) | std::views::reverse) {
-        //   spdlog::debug("v = {}, weight = {}", g[v].kmer, w);
-        // }
-        // assert(valid_path<Reverse>(new_path));
+        continue;
       }
+      
+      // find the previous branch point
+      auto prev_branch_pos = find_previous_branch_pos(path[i].second);
+
+      // No previous branch point found, which means the current branch point
+      // is at the head of path, trim it.
+      if (prev_branch_pos == -1) {
+        new_path.clear();
+        new_path.emplace_back(path[i]);
+        continue;
+      }
+
+      auto prev_branch_v = new_path[prev_branch_pos].first;
+      auto current_branch_v = path[i].first;
+      auto old_path_len = new_path.size() - prev_branch_pos;
+
+      // the path is too long, so the reassembled process may take a lot
+      // time, skip it
+      if (prev_branch_v == current_branch_v || old_path_len >= 2 * kmer_size) {
+        new_path.emplace_back(path[i]);
+        continue;
+      }
+
+      // Try to reassemble the path between previous branch point and current 
+      // branch point
+      auto reassembled_path = local_assemble<Reverse>(
+          prev_branch_v, current_branch_v,
+          old_path_len * param.LOCAL_ASSEMBLE_LENGTH_RATIO);
+
+      // remove the old_path, add the reassembled path
+      while (new_path.size() != prev_branch_pos + 1) {
+        // spdlog::debug("pop {}", g[new_path.back().first].kmer);
+        new_path.pop_back();
+      }
+      std::ranges::copy(reassembled_path, std::back_inserter(new_path));
+      assert(valid_path<Reverse>(new_path));
     }
     assert(valid_path<Reverse>(new_path));
     return new_path;
