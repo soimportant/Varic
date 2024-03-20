@@ -422,7 +422,7 @@ struct ReadGraph {
     auto order = std::vector<std::size_t>(paths.size());
     std::iota(order.begin(), order.end(), 0);
     auto cal_path_sum = [](const auto& p) {
-      assert(path.size() != 0);
+      assert(p.size() != 0);
       auto sum = 0.0;
       for (const auto& [v, w] : p) {
         sum += w;
@@ -572,8 +572,10 @@ struct ReadGraph {
       const auto [v, w, pos] = stk.top();
       stk.pop();
       if (v == sink) {
-        // spdlog::debug("Reach sink {}, branch_cnt = {}", g[v].kmer,
-        // branch_cnt);
+        // spdlog::debug("Reach sink = {}, path size = {}, max = {}", pretty_print(sink), path.size(), max_assemble_len);
+        // for (auto i = 0; i < path.size(); i++) {
+        //   spdlog::debug("{}", pretty_print(get_edge(path[i - 1].first, path[i].first)));
+        // }
         return true;
       }
       if (pos >= max_assemble_len) {
@@ -707,10 +709,13 @@ struct ReadGraph {
     return bio::Codec::to_string(seq);
   }
 
-  auto pretty_print(const ByteUnit unit) {
-    std::stringstream ss;
-    ss << std::hex << unit;
-    return ss.str();
+  auto pretty_print(const Vertex& v) {
+    return pretty_print(get_kmer(v));
+  }
+
+  auto pretty_print(const Edge& e) {
+    return fmt::format("({} -> {}, w = {}", pretty_print(g.source(e)),
+                        pretty_print(g.target(e)), g[e].count);
   }
 
   auto decode_unit_to_seq(const ByteUnit unit) -> bio::istring {
@@ -950,7 +955,10 @@ struct ReadGraph {
     //   path = max_path;
     // }
 
+    // spdlog::debug("Find path from {} to {}", pretty_print(get_kmer(source)),
+                  // pretty_print(get_kmer(sink)));
     auto result = path_finder<Reverse>(source, sink, path);
+    // spdlog::debug("Result = {}", result);
     if (result == false) {
       // spdlog::debug("Cannot find a proper path for given source and sink");
       // spdlog::debug("Using path with maximum length({}) as result",

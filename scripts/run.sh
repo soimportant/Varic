@@ -7,10 +7,16 @@ ulimit -s unlimited
 ROOT_DIR="/mnt/ec/ness/yolkee/thesis"
 
 # read and parse args, if not set, use default values
-while getopts ":t:d" opt; do
+while getopts ":a:t:p:d" opt; do
   case $opt in
+    a)
+      depth=$OPTARG
+      ;;
     t)
       thread=$OPTARG
+      ;;
+    p)
+      pruned=$OPTARG
       ;;
     d)
       debug=1
@@ -30,46 +36,68 @@ if [ -z "$debug" ]; then
   debug=0
 fi
 
-species="Ecoli"
-strain="K12"
-seq_platform="ONT"
-seq_depth=20
+if [ -z "$depth" ]; then
+  depth=-1
+fi
 
-DATA_DIR="$ROOT_DIR/data/$species/$strain"
-RESULT_DIR="$ROOT_DIR/results/$species/$strain"
+if [ -z "$pruned" ]; then
+  pruned=0.95
+fi
 
-raw_read="$DATA_DIR/reads/$seq_platform/D$seq_depth/merged_reads.fastq"
-overlap_paf="$DATA_DIR/reads/$seq_platform/D$seq_depth/merged_reads.overlap.paf"
-output="$RESULT_DIR/$seq_platform/D$seq_depth/me/corrected.fasta"
+echo "Debug mode: $debug, max_depth = $depth, pruned = $pruned"
 
 # massif_output="/mnt/ec/ness/yolkee/thesis/scripts/massif.txt"
 #heap_profile="/mnt/ec/ness/yolkee/thesis/tmp/profile/heap"
 #export HEAPPROFILE=$heap_profile
 
+species="yeast"
+strain="S288C_2_QS"
 
-# Run correction
-echo "Running correction"
-CORRECTOR_EXE="$ROOT_DIR/build/main"
-CORRECTOR_ARGS="-r $raw_read -c $overlap_paf -o $output -t $thread -p $seq_platform"
-if [ $debug -eq 1 ]; then
-  CORRECTOR_ARGS="$CORRECTOR_ARGS --debug"
-fi
-$CORRECTOR_EXE $CORRECTOR_ARGS
+DATA_DIR="$ROOT_DIR/data/$species/$strain"
+RESULT_DIR="$ROOT_DIR/results/$species/$strain"
 
-# Run evaluation
-echo "Running evaluation"
-EVAL_EXE="$ROOT_DIR/eval/scripts/run_eval.py"
-EVAL_ARGS="-d $DATA_DIR -c $output -p $seq_platform --depth $seq_depth -o $RESULT_DIR/$seq_platform/D$seq_depth/me -t $thread"
-if [ $debug -eq 1 ]; then
-  EVAL_ARGS="$EVAL_ARGS --debug"
-fi
+# iterate seq_platform("PacBio", "ONT") and seq_depth(10, 20, 30, 50)
 
-$EVAL_EXE $EVAL_ARGS
+# for seq_platform in "ONT" "ONT_HQ" "PacBio-RSII" "PacBio-SEQUEL"; do
 
-# Draw evaluation plots
-echo "Drawing plots"
-PLOT_EXE="$ROOT_DIR/eval/scripts/draw/draw_eval.py"
-PLOT_ARGS="-r $RESULT_DIR -p $seq_platform -d $seq_depth"
-$PLOT_EXE $PLOT_ARGS
+for seq_depth in 10 20 30; do
+  for seq_platform in "ONT" "PacBio" ; do
 
-exit 0
+    raw_read="$DATA_DIR/reads/$seq_platform/D$seq_depth/merged_reads.fastq"
+    overlap_paf="$DATA_DIR/reads/$seq_platform/D$seq_depth/merged_reads.overlap.paf"
+    OUTPUT_DIR="$RESULT_DIR/$seq_platform/D$seq_depth/me_$pruned"
+    if [ $depth -ne -1 ]; then
+      OUTPUT_DIR="$OUTPUT_DIR"_d"$depth"
+    fi
+
+    corrected_read="$OUTPUT_DIR/corrected.fasta"
+
+    # create directory
+    mkdir -p $OUTPUT_DIR
+    echo "Running $seq_platform $seq_depth"
+
+    # Run correction
+    echo "Running correction"
+    CORRECTOR_EXE="$ROOT_DIR/build/main"
+    # CORRECTOR_ARGS="-r $raw_read -c $overlap_paf -o $corrected_read -t $thread -p $seq_platform --match $match --mismatch $mismatch --gap $gap --extend $gap"
+    CORRECTOR_ARGS="-r $raw_read -c $overlap_paf -o $corrected_read -t $thread -p $seq_platform -d $depth --prune $pruned"
+    if [ $debug -eq 1 ]; then
+      CORRECTOR_ARGS="$CORRECTOR_ARGS --debug"
+    fi
+    time $CORRECTOR_EXE $CORRECTOR_ARGS
+    
+    
+    # Run evaluation
+    echo "Running evaluation"
+    EVAL_EXE="$ROOT_DIR/eval/scripts/run_eval.py"
+    EVAL_ARGS="-d $DATA_DIR -c $corrected_read -p $seq_platform --depth $seq_depth -o $OUTPUT_DIR -t $thread"
+    if [ $debug -eq 1 ]; then
+      EVAL_ARGS="$EVAL_ARGS --debug"
+    fi
+    time $EVAL_EXE $EVAL_ARGS
+    
+  done
+done
+
+
+

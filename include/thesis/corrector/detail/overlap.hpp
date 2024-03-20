@@ -7,28 +7,32 @@
 class Overlap {
 public:
 
+  using id_t = std::uint32_t;
+  using pos_t = std::uint32_t;
+  using len_t = pos_t;
+
   /* query read id */
-  std::size_t q_id;
+  id_t q_id;
 
   /* left and right boundary of query read */
-  std::size_t q_idx_L, q_idx_R;
+  pos_t q_idx_L, q_idx_R;
 
   /* query sequence length */
-  std::size_t q_seq_len;
+  len_t q_seq_len;
 
   /* target read id */
-  std::size_t t_id;
+  id_t t_id;
 
   /* left and right boundary of target read */
-  std::size_t t_idx_L, t_idx_R;
+  pos_t t_idx_L, t_idx_R;
 
   /* target sequence length */
-  std::size_t t_seq_len;
+  len_t t_seq_len;
 
   /* forward strain(true) or reverse strain(false) */
   bool forward_strain;
 
-  auto extend(const std::size_t extend_len) noexcept {
+  auto extend(const len_t extend_len) noexcept {
     q_idx_L = q_idx_L > extend_len ? q_idx_L - extend_len : 0UL;
     q_idx_R = std::min(q_idx_R + extend_len, q_seq_len);
     t_idx_L = t_idx_L > extend_len ? t_idx_L - extend_len : 0UL;

@@ -29,6 +29,9 @@ class Sequence {
   Sequence(Sequence&&) = default;
   Sequence& operator=(Sequence&&) = default;
 
+  using id_t = std::uint32_t;
+  using pos_t = std::uint32_t;
+
   auto len() const noexcept { return seq.size(); }
 
   auto empty() const noexcept { return seq.empty(); }
@@ -36,11 +39,11 @@ class Sequence {
   ~Sequence() = default;
 
   /* the given id of read where the sequence come from */
-  int read_id;
+  id_t read_id;
 
   /* the left and right boundary of read */
   /* assert(right_bound - left_bound == seq.size() == qual.size()) */
-  std::size_t left_bound, right_bound;
+  pos_t left_bound, right_bound;
 
   /* the sequence, which is a subsequence of read */
   T seq;

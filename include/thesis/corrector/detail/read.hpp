@@ -103,6 +103,8 @@ class ReadWrapper : public R {
   ReadWrapper() {}
 
   using id_t = std::uint32_t;
+  using pos_t = std::uint32_t;
+  using len_t = pos_t;
 
   enum struct State {
     UNCORRECTED,
@@ -114,6 +116,13 @@ class ReadWrapper : public R {
     ASSEMBLED_FAILED,
   };
 
+  struct Param {
+    const int pre_assemble_min_mid_coverage = 15;
+    const int pre_assemble_max_end_coverage = 12;
+
+    const int pre_assemble_increase_coverage = 3;
+  } param;
+
   /**
    * @brief Initialize boundaries and backbone sequence for each window.
    * @details The window length will be equally divided by the length of read,
@@ -124,8 +133,7 @@ class ReadWrapper : public R {
    * @param window_extend_len extend length of window
    * @return void
    */
-  auto init_windows(const std::size_t max_window_len,
-                    const std::size_t window_extend_len,
+  auto init_windows(const len_t max_window_len, const len_t window_extend_len,
                     const std::size_t seed = 0) {
     const auto window_sz =
         len() / max_window_len + (len() % max_window_len != 0);
@@ -163,7 +171,7 @@ class ReadWrapper : public R {
    * @param end The end position of the range.
    * @return A subrange of windows within the specified range.
    */
-  auto get_window_range(std::size_t start, std::size_t end) {
+  auto get_window_range(pos_t start, pos_t end) {
     auto st = std::ranges::upper_bound(windows, start, {}, &Window::start);
     if (st != windows.end()) {
       st = std::prev(st);
@@ -197,10 +205,8 @@ class ReadWrapper : public R {
     auto forward_strain = overlap.forward_strain;
 
     /* corresponding interval of target read and query read in each window */
-    auto t_breakpoints =
-        std::vector<std::pair<std::size_t, std::size_t>>(window_cnt);
-    auto q_breakpoints =
-        std::vector<std::pair<std::size_t, std::size_t>>{window_cnt};
+    auto t_breakpoints = std::vector<std::pair<pos_t, pos_t>>(window_cnt);
+    auto q_breakpoints = std::vector<std::pair<pos_t, pos_t>>{window_cnt};
 
     /* iterator for query read and target read */
     auto [q_iter, t_iter] = std::make_pair(q_start, t_start);
@@ -208,16 +214,16 @@ class ReadWrapper : public R {
     auto t_last_match = t_iter;
 
     /* store the window indexes that window is not begin at 'M' region */
-    auto wait_for_first_match = std::queue<std::size_t>{};
+    auto wait_for_first_match = std::queue<id_t>{};
 
     /* store the window indexes that not reach the end of window */
-    auto wait_for_last_match = std::queue<std::size_t>{};
+    auto wait_for_last_match = std::queue<id_t>{};
 
     /**
      * @brief set the start position of target read when meet a match or
      * mismatch in cigar string for each window.
      */
-    auto set_start_pos_when_match = [&](std::size_t idx) {
+    auto set_start_pos_when_match = [&](id_t idx) {
       t_breakpoints[idx].first = t_iter;
       q_breakpoints[idx].first = q_iter;
       wait_for_last_match.push(idx);
@@ -233,7 +239,8 @@ class ReadWrapper : public R {
      * for `wait_for_last_match`, if window reach the end, record the last match
      * position of query read and target read.
      */
-    auto check_whether_reach_end = [&]() {
+    auto check_whether_reach_end =
+        [&]() {
       while (!wait_for_first_match.empty()) {
         auto idx = wait_for_first_match.front();
         if (q_iter + 1 == std::min(q_end, window_range[idx].end)) {
@@ -395,17 +402,16 @@ class ReadWrapper : public R {
     finished_windows_cnt++;
     if (finished_windows_cnt == windows.size()) {
       auto expected = State::BUILDING_WINDOW;
-      state.compare_exchange_weak(expected,
-                                  State::WAIT_FOR_ASSEMBLE);
+      state.compare_exchange_weak(expected, State::WAIT_FOR_ASSEMBLE);
       return true;
     }
     return false;
   }
 
-  auto check_can_pre_assembled(const std::size_t max_end_coverage = 12,
-                               const std::size_t min_end_coverage = 15) {
-    for (auto s = 0.01; s <= 0.02; s += 0.01) {
-      for (auto e = 0.01; e <= 0.02; e += 0.01) {
+  auto is_pre_assembly_possible(const std::size_t max_end_coverage = 12,
+                               const std::size_t min_mid_coverage = 15) {
+    for (auto s = 0.01; s <= 0.01; s += 0.01) {
+      for (auto e = 0.01; e <= 0.01; e += 0.01) {
         auto st = len() * s;
         auto ed = len() * (1.0 - e);
 
@@ -413,12 +419,20 @@ class ReadWrapper : public R {
         auto mid_coverage = coverage.get(st, ed - 1);
         auto tail_coverage = coverage.get(ed, len() - 1);
 
-        if (head_coverage.max_coverage < max_end_coverage ||
-            tail_coverage.max_coverage < max_end_coverage ||
-            mid_coverage.min_coverage < min_end_coverage) {
-          continue;
+        // if (id == 0) {
+        //   spdlog::info("head_max = {}, threshold = {}", head_coverage.max_coverage,
+        //                max_end_coverage);
+        //   spdlog::info("mid_min = {}, threshold = {}", mid_coverage.min_coverage,
+        //                 min_mid_coverage);
+        //   spdlog::info("tail_max = {}, threshold = {}", tail_coverage.max_coverage,
+        //                 max_end_coverage);
+        // }
+
+        if (head_coverage.max_coverage >= max_end_coverage &&
+            mid_coverage.min_coverage >= min_mid_coverage &&
+            tail_coverage.max_coverage >= max_end_coverage) {
+          return true;
         }
-        return true;
       }
     }
     return false;
@@ -433,9 +447,7 @@ class ReadWrapper : public R {
     return state == State::WAIT_FOR_ASSEMBLE;
   }
 
-  auto is_assembled() noexcept {
-    return state == State::ASSEMBLED_SUCCESS;
-  }
+  auto is_assembled() noexcept { return state == State::ASSEMBLED_SUCCESS; }
 
   auto build_window_finished() {
     return finished_windows_cnt == windows.size();
@@ -455,12 +467,14 @@ class ReadWrapper : public R {
     auto exchange = [&](State expected) {
       return state.compare_exchange_strong(expected, State::ASSEMBLING);
     };
-    return exchange(State::WAIT_FOR_ASSEMBLE) or exchange(State::PRE_ASSEMBLED_FAILED);
+    return exchange(State::BUILDING_WINDOW) ||
+           exchange(State::WAIT_FOR_ASSEMBLE) ||
+           exchange(State::PRE_ASSEMBLED_FAILED);
   }
 
   /**
    * @brief Check if the object is in an assembled state.
-   * 
+   *
    * @return true if the object is in an assembled state, false otherwise.
    */
   auto is_assembled() const noexcept {
@@ -511,8 +525,7 @@ class ReadWrapper : public R {
    * @throws std::out_of_range If the start position is out of range of the
    * sequence.
    */
-  auto subview(bool forward_strain, const std::size_t start,
-               const std::size_t end) const {
+  auto subview(bool forward_strain, const pos_t start, const pos_t end) const {
     if (start > end) {
       spdlog::error("start position {} is behind end position", start, end);
       throw std::invalid_argument("start position is behind end position");
@@ -555,14 +568,32 @@ class ReadWrapper : public R {
    * @param end
    * @return auto
    */
-  auto add_coverage(const std::size_t start, const std::size_t end) noexcept {
-    if (state == State::PRE_ASSEMBLED_FAILED) {
+  auto add_coverage(const pos_t start, const pos_t end) noexcept {
+    coverage.modify(start, end, 1);
+    auto max_end_coverage = param.pre_assemble_max_end_coverage +
+                            assemble_try * param.pre_assemble_increase_coverage;
+    auto min_mid_coverage = param.pre_assemble_min_mid_coverage +
+                            assemble_try * param.pre_assemble_increase_coverage;
+    if (!is_pre_assembly_possible(max_end_coverage, min_mid_coverage)) {
       return;
     }
-    coverage.modify(start, end, 1);
-    if (check_can_pre_assembled() && acquire_assembling()) {
-      assemble_corrected_seq(true);
+    if (!acquire_assembling()) {
+      return;
     }
+    assemble_corrected_seq(true);
+    if (!is_assembled()) {
+      assemble_try++;
+    }
+
+    // if (is_pre_assembly_possible(max_end_coverage, min_mid_coverage)) {
+    //   // bool acquired = acquire_assembling();
+    //   if (acquire_assembling()) {
+    //     assemble_corrected_seq(true);
+    //     if (!is_assembled()) {
+    //       assemble_try++;
+    //     }
+    //   }
+    // }
   }
 
   /**
@@ -575,7 +606,7 @@ class ReadWrapper : public R {
    * @param read_id The ID of the read.
    * @return The number of fragments for the given read ID.
    */
-  auto get_fragment_cnt(std::size_t read_id) noexcept {
+  auto get_fragment_cnt(id_t read_id) noexcept {
     if (!fragment_cnt.contains(read_id)) {
       spdlog::warn("read {} not contains fragments from read {}", this->id,
                    read_id);
@@ -616,7 +647,7 @@ class ReadWrapper : public R {
    * @return The index associated with the given ID, or 0 if the ID is not
    * found.
    */
-  auto get_index(std::size_t id) noexcept {
+  auto get_index(id_t id) noexcept {
     if (!indexes.contains(id)) {
       spdlog::warn("read {} not contains fragments from read {}", this->id, id);
       return 0ul;
@@ -646,17 +677,21 @@ class ReadWrapper : public R {
    * @param idx The index of the fragment to set.
    * @param fragment The corrected fragment to set.
    */
-  auto set_corrected_fragment(std::size_t idx, Sequence<std::string> fragment) {
-    assert(idx < fragments.size() && "idx out of range");
+  auto set_corrected_fragment(id_t idx, Sequence<std::string> fragment) {
     if (fragment.left_bound > fragment.right_bound) {
       spdlog::warn("left_bound {} > right_bound {}", fragment.left_bound,
                    fragment.right_bound);
       fragment.left_bound = fragment.right_bound;
     }
-    fragments[idx] = std::move(fragment);
-    add_coverage(fragments[idx].left_bound, fragments[idx].right_bound - 1);
+    auto [left, right] = std::tie(fragment.left_bound, fragment.right_bound);
+    {
+      auto lock = std::scoped_lock(fragments_mtx);
+      if (!fragments.empty()) {
+        fragments[idx] = std::move(fragment);
+      }
+    }
+    add_coverage(left, right - 1);
   }
-
 
   auto save_corrected_fragments(const fs::path& path) {
     auto fout = std::ofstream(path);
@@ -698,13 +733,16 @@ class ReadWrapper : public R {
     this->corrected_seq = assembler.assemble();
     if (this->corrected_seq.size() > 0) {
       state = State::ASSEMBLED_SUCCESS;
+      auto lock = std::scoped_lock(fragments_mtx);
+      fragments.clear();
+      fragments.shrink_to_fit();
     } else {
       if (pre_assembled) {
         state = State::PRE_ASSEMBLED_FAILED;
       } else {
         state = State::ASSEMBLED_FAILED;
       }
-    } 
+    }
   }
 
   auto clear() {
@@ -786,9 +824,13 @@ class ReadWrapper : public R {
    * corrected sequence fragments from windows of others read, may further
    * assemble to correct version of this read
    */
+  std::mutex fragments_mtx;
   std::vector<Sequence<std::string>> fragments;
   std::atomic_uint32_t total_fragments{0};
   segtree coverage{1};
+
+  /* */
+  std::int32_t assemble_try = 0;
 
   std::string corrected_seq;
 };

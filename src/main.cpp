@@ -143,10 +143,10 @@ int main(int argc, char* argv[]) {
          "window, -1 means take all sequences. This will be used to reduce the "
          "run-time of the program, but will effect the accuracy of the result.")
         // seed for random number generator
-        ("seed", bpo::value<std::int64_t>()->default_value(std::chrono::steady_clock::now().time_since_epoch().count()),
-         "The seed for random number generator")
-        ("quiet,q", bpo::bool_switch()->default_value(false),
-         "disable all log")
+        ("seed", bpo::value<std::int64_t>(),
+         "The seed for random number generator")(
+            "quiet,q", bpo::bool_switch()->default_value(false),
+            "disable all log")
         // debug flag
         ("debug", bpo::bool_switch()->default_value(false),
          "enable debug mode (print verbose log to stderr)");
@@ -177,7 +177,11 @@ int main(int argc, char* argv[]) {
   auto depth = vmap["depth"].as<int>();
   auto prune_ratio = vmap["prune"].as<double>();
 
-  auto seed = vmap["seed"].as<std::int64_t>();
+  auto seed = vmap.contains("seed")
+                  ? vmap["seed"].as<std::int64_t>()
+                  : std::chrono::system_clock::now()
+                        .time_since_epoch()
+                        .count();
   auto quiet = vmap["quiet"].as<bool>();
 
   if (debug_mode) {
@@ -188,12 +192,14 @@ int main(int argc, char* argv[]) {
     spdlog::set_level(spdlog::level::info);
   }
   omp_set_num_threads(thread);
+  spdlog::info("Write output to {}", output_path.string());
 
   auto overlap = read_records<bio::PafRecord>(overlap_path);
   auto call_corrector = [&]<class R>() {
     auto raw_reads = read_records<R>(reads_path);
-    auto corrector = FragmentedReadCorrector<R>(
-        std::move(raw_reads), std::move(overlap), platform, thread, depth, prune_ratio, seed);
+    auto corrector =
+        FragmentedReadCorrector<R>(std::move(raw_reads), std::move(overlap),
+                                   platform, thread, depth, prune_ratio, seed);
     corrector.set_alignment_params(match, mismatch, gap, extend);
     auto corrected_read = corrector.correct();
     return corrected_read;

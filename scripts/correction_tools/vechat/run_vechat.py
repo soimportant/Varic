@@ -5,9 +5,82 @@ import sys
 import os
 import argparse
 import shutil
+from resource import *
+import time
 from Bio import SeqIO
 
 TOOL="vechat"
+
+
+def time_wrapper(t):
+  unit = {
+    1000: "s",
+    1: "ms"
+  }
+#for v, s in unit.items():
+#   if t >= v:
+#     return f"{t / v:.4f} {s}"
+  return f"{t:.4f} s"
+
+
+def memory_wrapper(m):
+  unit = {
+    1024*1024: "GB",
+    1024: "MB",
+    1: "KB",
+  }
+  for v, s in unit.items():
+    if m >= v:
+      return f"{m / v:.4f} {s}"
+  return f"{m:.4f} KB"
+
+
+def run_cmd(cmd, stdout = sys.stdout, stderr = sys.stderr):
+  if type(cmd) == str:
+    cmd = cmd.split()
+  p = Popen(cmd, stdout=stdout, stderr=stderr)
+  try:
+    p.wait()
+  except KeyboardInterrupt:
+    p.kill()
+
+  if p.returncode != 0:
+    print(f"\nYour job is failed with returncode = {abs(p.returncode)}")
+  else:
+    print("\nYour job is successfully finished\n")
+
+  src = getrusage(RUSAGE_CHILDREN)
+  print("==========================")
+  print("Resource usage of your job")
+  print("==========================")
+
+  m = [
+    ("User time", src.ru_utime, time_wrapper),
+    ("System time", src.ru_stime, time_wrapper),
+    ("Peak Memory usage", src.ru_maxrss, memory_wrapper),
+    ("Shared memory size", src.ru_ixrss, memory_wrapper),
+    ("Unshared memory size", src.ru_idrss, memory_wrapper),
+    ("Unshared stack size", src.ru_isrss, memory_wrapper),
+    ("Page faults not requiring I/O", src.ru_minflt, None),
+    ("Page faults requiring I/O", src.ru_majflt, None),
+    ("Number of swap out", src.ru_nswap, None),
+    ("Block input operations", src.ru_inblock, None),
+    ("Block output operations", src.ru_oublock, None),
+    ("Messages sent", src.ru_msgsnd, None),
+    ("Messages received", src.ru_msgrcv, None),
+    ("Signal received", src.ru_nsignals, None),
+    ("Voluntary context switches", src.ru_nvcsw, None),
+    ("Involunatary context switches", src.ru_nivcsw, None)
+  ]
+  for a, b, f in m:
+    if f != None:
+      print(f"{a:{33}}: {f(b)}")
+    else:
+      print(f"{a:{33}}: {b}")
+
+  return p.returncode
+  
+
 
 def main():
   parser = argparse.ArgumentParser(prog="run_vechat")
@@ -47,11 +120,10 @@ def main():
   ]
   cmd = [exe] + opts
 
-  print(f"{TOOL} command =", ' '.join(cmd))
-  proc = Popen(cmd)
-  proc.wait()
-  if proc.returncode != 0:
-    print(f"Error: {TOOL} failed with exit code {proc.returncode}")
+  # print(f"{TOOL} command =", ' '.join(cmd))
+  returncode = run_cmd(cmd)
+  if returncode != 0:
+    print(f"Error: {TOOL} failed with exit code {returncode}")
     exit(-1)
 
   # read result and remove suffix "rr" in read name 

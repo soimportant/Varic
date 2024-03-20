@@ -1,52 +1,211 @@
-#pragma once
-
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
-#include <functional>
 #include <vector>
-
-/**
- * We use segment tree to define the minimum coverage that a set of intervals
- * can cover when a read has enough coverage, the we can say that the read is
- * valid for assembly
- */
 
 class segtree {
  public:
-  class node {
-   public:
-    /**
-     * Initialize the data member of leaves
-     */
-    node() {
-      min_coverage = 0;
-      max_coverage = 0;
-      lazy_add = 0;
-    }
+  struct node {
+    // don't forget to set default value (used for leaves)
+    // not necessarily neutral element!
 
-    /**
-     * determine how to modify the property of a segment
-     * remember to set the lazy flag
-     */
-    void apply(int val) {
-      min_coverage += val;
-      max_coverage += val;
-      lazy_add += val;
-    }
-    std::int16_t min_coverage;
-    std::int16_t max_coverage;
+    std::int16_t min_coverage = 0;
+    std::int16_t max_coverage = 0;
     std::int16_t lazy_add = 0;
+
+    void apply(int l, int r, int v) {
+      min_coverage += v;
+      max_coverage += v;
+      lazy_add += v;
+    }
   };
+
+  node unite(const node& a, const node& b) const {
+    node res;
+    res.min_coverage = std::min(a.min_coverage, b.min_coverage);
+    res.max_coverage = std::max(a.max_coverage, b.max_coverage);
+    return res;
+  }
+
+  inline void push(int x, int l, int r) {
+    int y = (l + r) >> 1;
+    int z = x + ((y - l + 1) << 1);
+    // push from x into (x + 1) and z
+
+    if (tree[x].lazy_add != 0) {
+      tree[x + 1].apply(l, y, tree[x].lazy_add);
+      tree[z].apply(y + 1, r, tree[x].lazy_add);
+      tree[x].lazy_add = 0;
+    }
+    /*
+        if (tree[x].add != 0) {
+          tree[x + 1].apply(l, y, tree[x].add);
+          tree[z].apply(y + 1, r, tree[x].add);
+          tree[x].add = 0;
+        }
+    */
+  }
+
+  inline void pull(int x, int z) { tree[x] = unite(tree[x + 1], tree[z]); }
+
+  int n;
+  std::vector<node> tree;
+
+  void build(int x, int l, int r) {
+    if (l == r) {
+      return;
+    }
+    int y = (l + r) >> 1;
+    int z = x + ((y - l + 1) << 1);
+    build(x + 1, l, y);
+    build(z, y + 1, r);
+    pull(x, z);
+  }
+
+  template <typename M>
+  void build(int x, int l, int r, const std::vector<M>& v) {
+    if (l == r) {
+      tree[x].apply(l, r, v[l]);
+      return;
+    }
+    int y = (l + r) >> 1;
+    int z = x + ((y - l + 1) << 1);
+    build(x + 1, l, y, v);
+    build(z, y + 1, r, v);
+    pull(x, z);
+  }
+
+  node get(int x, int l, int r, int ll, int rr) {
+    if (ll <= l && r <= rr) {
+      return tree[x];
+    }
+    int y = (l + r) >> 1;
+    int z = x + ((y - l + 1) << 1);
+    push(x, l, r);
+    node res{};
+    if (rr <= y) {
+      res = get(x + 1, l, y, ll, rr);
+    } else {
+      if (ll > y) {
+        res = get(z, y + 1, r, ll, rr);
+      } else {
+        res = unite(get(x + 1, l, y, ll, rr), get(z, y + 1, r, ll, rr));
+      }
+    }
+    pull(x, z);
+    return res;
+  }
+
+  template <typename... M>
+  void modify(int x, int l, int r, int ll, int rr, const M&... v) {
+    if (ll <= l && r <= rr) {
+      tree[x].apply(l, r, v...);
+      return;
+    }
+    int y = (l + r) >> 1;
+    int z = x + ((y - l + 1) << 1);
+    push(x, l, r);
+    if (ll <= y) {
+      modify(x + 1, l, y, ll, rr, v...);
+    }
+    if (rr > y) {
+      modify(z, y + 1, r, ll, rr, v...);
+    }
+    pull(x, z);
+  }
+
+  // int find_first_knowingly(int x, int l, int r,
+  //                          const function<bool(const node&)>& f) {
+  //   if (l == r) {
+  //     return l;
+  //   }
+  //   push(x, l, r);
+  //   int y = (l + r) >> 1;
+  //   int z = x + ((y - l + 1) << 1);
+  //   int res;
+  //   if (f(tree[x + 1])) {
+  //     res = find_first_knowingly(x + 1, l, y, f);
+  //   } else {
+  //     res = find_first_knowingly(z, y + 1, r, f);
+  //   }
+  //   pull(x, z);
+  //   return res;
+  // }
+
+  // int find_first(int x, int l, int r, int ll, int rr,
+  //                const function<bool(const node&)>& f) {
+  //   if (ll <= l && r <= rr) {
+  //     if (!f(tree[x])) {
+  //       return -1;
+  //     }
+  //     return find_first_knowingly(x, l, r, f);
+  //   }
+  //   push(x, l, r);
+  //   int y = (l + r) >> 1;
+  //   int z = x + ((y - l + 1) << 1);
+  //   int res = -1;
+  //   if (ll <= y) {
+  //     res = find_first(x + 1, l, y, ll, rr, f);
+  //   }
+  //   if (rr > y && res == -1) {
+  //     res = find_first(z, y + 1, r, ll, rr, f);
+  //   }
+  //   pull(x, z);
+  //   return res;
+  // }
+
+  // int find_last_knowingly(int x, int l, int r,
+  //                         const function<bool(const node&)>& f) {
+  //   if (l == r) {
+  //     return l;
+  //   }
+  //   push(x, l, r);
+  //   int y = (l + r) >> 1;
+  //   int z = x + ((y - l + 1) << 1);
+  //   int res;
+  //   if (f(tree[z])) {
+  //     res = find_last_knowingly(z, y + 1, r, f);
+  //   } else {
+  //     res = find_last_knowingly(x + 1, l, y, f);
+  //   }
+  //   pull(x, z);
+  //   return res;
+  // }
+
+  // int find_last(int x, int l, int r, int ll, int rr,
+  //               const function<bool(const node&)>& f) {
+  //   if (ll <= l && r <= rr) {
+  //     if (!f(tree[x])) {
+  //       return -1;
+  //     }
+  //     return find_last_knowingly(x, l, r, f);
+  //   }
+  //   push(x, l, r);
+  //   int y = (l + r) >> 1;
+  //   int z = x + ((y - l + 1) << 1);
+  //   int res = -1;
+  //   if (rr > y) {
+  //     res = find_last(z, y + 1, r, ll, rr, f);
+  //   }
+  //   if (ll <= y && res == -1) {
+  //     res = find_last(x + 1, l, y, ll, rr, f);
+  //   }
+  //   pull(x, z);
+  //   return res;
+  // }
 
   segtree(int _n) : n(_n) {
     assert(n > 0);
-    int sz = 1;
-    while (sz < n) {
-      sz <<= 1;
-    }
-    tree.resize(sz << 1);
-    build(1, 0, n - 1);
+    tree.resize(2 * n - 1);
+    build(0, 0, n - 1);
+  }
+
+  template <typename M>
+  segtree(const std::vector<M>& v) {
+    n = v.size();
+    assert(n > 0);
+    tree.resize(2 * n - 1);
+    build(0, 0, n - 1, v);
   }
 
   /* move constructor */
@@ -62,173 +221,32 @@ class segtree {
     return *this;
   }
 
-  /**
-   * get the merge result from two segments
-   */
-  node merge(const node& a, const node& b) {
-    node res{};
-    res.min_coverage = std::min(a.min_coverage, b.min_coverage);
-    res.max_coverage = std::max(a.max_coverage, b.max_coverage);
-    return res;
+  node get(int ll, int rr) {
+    assert(0 <= ll && ll <= rr && rr <= n - 1);
+    return get(0, 0, n - 1, ll, rr);
   }
 
-  /**
-   * push property of the node to its child node
-   */
-  void push(int idx) {
-    int idxL = idx * 2, idxR = idx * 2 + 1;
-
-    /**
-     * if the lazy flag is set, push the property to its child
-     */
-    if (tree[idx].lazy_add != 0) {
-      tree[idxL].apply(tree[idx].lazy_add);
-      tree[idxR].apply(tree[idx].lazy_add);
-      tree[idx].lazy_add = 0;
-    }
-  }
-
-  // template<class T>
-  // segtree(const std::vector<T>& v) {
-  //   n = (int) v.size();
-  //   assert(n > 0);
-  //   int sz = 1;
-  //   while (sz < n) {
-  //     sz <<= 1;
-  //   }
-  //   tree.resize(sz << 1);
-  //   build(v, 1, 0, n - 1);
-  // }
-
-  // template<class T>
-  // void build(const std::vector<T>& v) {
-  //   assert((int) v.size() == n);
-  //   build(v, 1, 0, n - 1);
-  // }
-
-  template <class... T>
-  void modify(int l, int r, const T&... val) {
-    assert(0 <= l && l <= r && r < n);
-    modify(l, r, 1, 0, n - 1, val...);
-  }
-  node get(int l, int r) {
-    assert(0 <= l && l <= r && r < n);
-    return get(l, r, 1, 0, n - 1);
-  }
   node get(int p) {
-    assert(0 <= p && p < n);
-    return get(p, p, 1, 0, n - 1);
+    assert(0 <= p && p <= n - 1);
+    return get(0, 0, n - 1, p, p);
   }
 
-  // int find_last(int l, int r, const function<bool(const node&)>& f) {
-  //   return find_last(l, r, 1, 0, n - 1, f);
-  // }
-
-  // int find_first(int l, int r, const function<bool(const node&)>& f) {
-  //   return find_first(l, r, 1, 0, n - 1, f);
-  // }
-
- private:
-  void build(int idx, int l, int r) {
-    if (l == r) {
-      return;
-    }
-    int mid = (l + r) >> 1, idxL = idx * 2, idxR = idx * 2 + 1;
-    build(idxL, l, mid);
-    build(idxR, mid + 1, r);
-    tree[idx] = merge(tree[idxL], tree[idxR]);
+  template <typename... M>
+  void modify(int ll, int rr, const M&... v) {
+    assert(0 <= ll && ll <= rr && rr <= n - 1);
+    modify(0, 0, n - 1, ll, rr, v...);
   }
 
-  // template<class T>
-  // void build(const std::vector<T>& v, int idx, int l, int r) {
-  //   if (l == r) {
-  //     tree[idx].apply(v[l]);
-  //     return;
-  //   }
-  //   int mid = (l + r) >> 1, idxL = idx * 2, idxR = idx * 2 + 1;
-  //   build(v, idxL, l, mid);
-  //   build(v, idxR, mid + 1, r);
-  //   tree[idx] = merge(tree[idxL], tree[idxR]);
+  // find_first and find_last call all FALSE elements
+  // to the left (right) of the sought position exactly once
+
+  // int find_first(int ll, int rr, const function<bool(const node&)>& f) {
+  //   assert(0 <= ll && ll <= rr && rr <= n - 1);
+  //   return find_first(0, 0, n - 1, ll, rr, f);
   // }
 
-  template <class... T>
-  void modify(const int& ql, const int& qr, int idx, int l, int r, T... val) {
-    if (ql <= l && r <= qr) {
-      tree[idx].apply(val...);
-      return;
-    }
-    push(idx);
-    int mid = (l + r) >> 1, idxL = idx * 2, idxR = idx * 2 + 1;
-    if (ql <= mid) {
-      modify(ql, qr, idxL, l, mid, val...);
-    }
-    if (qr > mid) {
-      modify(ql, qr, idxR, mid + 1, r, val...);
-    }
-    tree[idx] = merge(tree[idxL], tree[idxR]);
-  }
-
-  node get(int ql, int qr, int idx, int l, int r) {
-    if (ql <= l && r <= qr) {
-      return tree[idx];
-    }
-    push(idx);
-    int mid = (l + r) >> 1, idxL = idx * 2, idxR = idx * 2 + 1;
-    node res{};
-    if (qr <= mid) {
-      res = get(ql, qr, idxL, l, mid);
-    } else if (ql > mid) {
-      res = get(ql, qr, idxR, mid + 1, r);
-    } else {
-      res = merge(get(ql, qr, idxL, l, mid), get(ql, qr, idxR, mid + 1, r));
-    }
-    return res;
-  }
-
-  // int find_last(int ql, int qr, int idx, int l, int r, const
-  // function<bool(const node&)>& f) {
-  //   int mid = (l + r) >> 1, idxL = idx * 2, idxR = idx * 2 + 1;
-  //   if (l > qr || r < ql) {
-  //     return -1;
-  //   }
-  //   if (!f(tree[idx])) {
-  //     return -1;
-  //   } else {
-  //     if (l == r) {
-  //       return l;
-  //     }
-  //   }
-  //   push(idx);
-  //   int res = find_last(ql, qr, idxR, mid + 1, r, f);
-  //   if (res == -1) {
-  //     res = find_last(ql, qr, idxL, l, mid, f);
-  //   }
-  //   return res;
+  // int find_last(int ll, int rr, const function<bool(const node&)>& f) {
+  //   assert(0 <= ll && ll <= rr && rr <= n - 1);
+  //   return find_last(0, 0, n - 1, ll, rr, f);
   // }
-
-  // int find_first(int ql, int qr, int idx, int l, int r, const
-  // function<bool(const node&)>& f) {
-  //   int mid = (l + r) >> 1, idxL = idx * 2, idxR = idx * 2 + 1;
-  //   if (l > qr || r < ql) {
-  //     return -1;
-  //   }
-  //   if (!f(tree[idx])) {
-  //     return -1;
-  //   } else {
-  //     if (l == r) {
-  //       return l;
-  //     }
-  //   }
-  //   push(idx);
-  //   int res = find_first(ql, qr, idxL, l, mid, f);
-  //   if (res == -1) {
-  //     res = find_first(ql, qr, idxR, mid + 1, r, f);
-  //   }
-  //   return res;
-  // }
-
-  int n;
-  std::vector<node> tree;
 };
-
-using segnode = segtree::node;
