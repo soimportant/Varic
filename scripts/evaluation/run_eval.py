@@ -178,7 +178,7 @@ def main():
                       required=True,
                       choices=["PacBio", "ONT"],
                       help="Sequencing platform of raw reads")
-  parser.add_argument("--depth",
+  parser.add_argument("-D", "--depth",
                       dest="depth", type=int,
                       required=True,
                       help="Sequencing depth of raw reads")

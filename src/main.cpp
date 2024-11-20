@@ -104,12 +104,12 @@ int main(int argc, char* argv[]) {
         ("raw_read,r",
          bpo::value<fs::path>()->required()->notifier(
              make_path_checker("raw_read")),
-         "The path to TGS raw reads")
+         "The path to TGS raw reads (.fasta or .fastq)")
         // overlap information
         ("overlap_info,c",
          bpo::value<fs::path>()->required()->notifier(
              make_path_checker("overlap_info")),
-         "The path to the overlap information of raw reads(.paf)")
+         "The path to the overlap information of raw reads (.paf)")
         // output path of corrected read
         ("output_path,o", bpo::value<fs::path>()->required(),
          "The output path of corrected read")
@@ -141,7 +141,8 @@ int main(int argc, char* argv[]) {
         ("depth,d", bpo::value<int>()->default_value(-1),
          "The maximum sequence to be used when building variation graph of a "
          "window, -1 means take all sequences. This will be used to reduce the "
-         "run-time of the program, but will effect the accuracy of the result.")
+         "run-time of the program, but will slight effect the accuracy of the " 
+         "result.")
         // seed for random number generator
         ("seed", bpo::value<std::int64_t>(),
          "The seed for random number generator")(
@@ -151,10 +152,10 @@ int main(int argc, char* argv[]) {
         ("debug", bpo::bool_switch()->default_value(false),
          "enable debug mode (print verbose log to stderr)");
     bpo::store(bpo::parse_command_line(argc, argv, opts), vmap);
-    bpo::notify(vmap);
     if (vmap.contains("help")) {
       exit_and_print_help(opts);
     }
+    bpo::notify(vmap);
     check_argument(vmap);
   } catch (const std::exception& ex) {
     spdlog::error("{}", ex.what());
@@ -166,7 +167,7 @@ int main(int argc, char* argv[]) {
   auto output_path = vmap["output_path"].as<fs::path>();
   auto platform = vmap["platform"].as<std::string>();
 
-  auto debug_mode = vmap["debug"].as<bool>();
+  auto debug = vmap["debug"].as<bool>();
   auto thread = vmap["thread"].as<int>();
 
   auto match = vmap["match"].as<int>();
@@ -184,13 +185,18 @@ int main(int argc, char* argv[]) {
                         .count();
   auto quiet = vmap["quiet"].as<bool>();
 
-  if (debug_mode) {
+  if (debug) {
     auto logger = spdlog::stderr_color_mt("logger");
     spdlog::set_default_logger(logger);
     spdlog::set_level(spdlog::level::debug);
   } else {
     spdlog::set_level(spdlog::level::info);
   }
+
+  if (quiet) {
+    spdlog::set_level(spdlog::level::off);
+  }
+
   omp_set_num_threads(thread);
   spdlog::info("Write output to {}", output_path.string());
 

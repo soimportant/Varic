@@ -1,5 +1,6 @@
 #! /usr/bin/bash
 
+# set -x
 set -e
 source /mnt/ec/ness/yolkee/miniconda3/bin/activate bio
 ulimit -s unlimited
@@ -50,8 +51,8 @@ echo "Debug mode: $debug, max_depth = $depth, pruned = $pruned"
 #heap_profile="/mnt/ec/ness/yolkee/thesis/tmp/profile/heap"
 #export HEAPPROFILE=$heap_profile
 
-species="yeast"
-strain="S288C_2_QS"
+species="Ecoli"
+strain="K12_v2"
 
 DATA_DIR="$ROOT_DIR/data/$species/$strain"
 RESULT_DIR="$ROOT_DIR/results/$species/$strain"
@@ -60,14 +61,14 @@ RESULT_DIR="$ROOT_DIR/results/$species/$strain"
 
 # for seq_platform in "ONT" "ONT_HQ" "PacBio-RSII" "PacBio-SEQUEL"; do
 
-for seq_depth in 10 20 30; do
-  for seq_platform in "ONT" "PacBio" ; do
+for seq_depth in 10; do
+  for seq_platform in "ONT"; do
 
     raw_read="$DATA_DIR/reads/$seq_platform/D$seq_depth/merged_reads.fastq"
     overlap_paf="$DATA_DIR/reads/$seq_platform/D$seq_depth/merged_reads.overlap.paf"
     OUTPUT_DIR="$RESULT_DIR/$seq_platform/D$seq_depth/me_$pruned"
     if [ $depth -ne -1 ]; then
-      OUTPUT_DIR="$OUTPUT_DIR"_d"$depth"
+      OUTPUT_DIR="$OUTPUT_DIR"_d"$depth"_early
     fi
 
     corrected_read="$OUTPUT_DIR/corrected.fasta"
@@ -78,7 +79,7 @@ for seq_depth in 10 20 30; do
 
     # Run correction
     echo "Running correction"
-    CORRECTOR_EXE="$ROOT_DIR/build/main"
+    CORRECTOR_EXE="$ROOT_DIR/build/varic"
     # CORRECTOR_ARGS="-r $raw_read -c $overlap_paf -o $corrected_read -t $thread -p $seq_platform --match $match --mismatch $mismatch --gap $gap --extend $gap"
     CORRECTOR_ARGS="-r $raw_read -c $overlap_paf -o $corrected_read -t $thread -p $seq_platform -d $depth --prune $pruned"
     if [ $debug -eq 1 ]; then

@@ -36,14 +36,19 @@ class BaseReadCorrector {
     std::sort(std::execution::par, filtered_reads.begin(), filtered_reads.end(),
               [&](auto& a, auto& b) { return a.name < b.name; });
     raw_reads_size = filtered_reads.size();
-    raw_reads_rc_seq.resize(filtered_reads.size());
-    raw_reads_rev_qual.resize(filtered_reads.size());
+    reads.resize(raw_reads_size);
+    for (auto i : std::views::iota(0ull, raw_reads_size)) {
+      reads[i] =
+    }
+
+
     std::swap(this->raw_reads, filtered_reads);
 
     /* transform read name to id */
     for (const auto& raw_read : this->raw_reads) {
       name2id[raw_read.name] = name2id.size();
     }
+    reads.resize(raw_reads_size);
   }
 
   /**
@@ -52,7 +57,7 @@ class BaseReadCorrector {
    * @param overlaps
    * @return
    */
-  auto overlap_preprocess() {
+  auto overlap_preprocess(std::vector<bio::PafRecord>& overlaps) {
     assert(std::ranges::is_sorted(raw_reads, {}, &R::name) &&
            "raw_reads must be sorted by name");
     spdlog::info("Overlap preprocessing...");

@@ -6,9 +6,7 @@
 #include "thesis/corrector/detail/sequence.hpp"
 #include "thesis/ds/graph/read_graph.hpp"
 
-
 class ReadAssembler {
-
   enum State {
     // INIT,
     ASSEMBLE_FAILED,
@@ -18,8 +16,6 @@ class ReadAssembler {
   };
 
   struct Param {
-
-
     /**
      * Parameters that used on identifying source and sink
      */
@@ -49,7 +45,6 @@ class ReadAssembler {
     const double ASSEMBLE_MAX_LEN_RATIO = 1;
   } param;
 
-
   /**
    * Identifies the source vertices in the given ReadGraph based on the
    * specified criteria.
@@ -58,7 +53,7 @@ class ReadAssembler {
    * @return A vector of source vertices satisfying the criteria, or an empty
    * vector if no sink vertices are found.
    */
-  auto identify_source_from_graph(ReadGraph &graph) {
+  auto identify_source_from_graph(ReadGraph& graph) {
     for (auto occ = param.MAX_END_OCC; occ >= param.MIN_END_OCC; --occ) {
       for (auto ratio = 0.0; ratio < param.MAX_END_LEN_RATIO;
            ratio += param.INCREASE_END_LEN_RATIO) {
@@ -82,7 +77,7 @@ class ReadAssembler {
    * @return A vector of sink vertices satisfying the criteria, or an empty
    * vector if no sink vertices are found.
    */
-  auto identify_sink_from_graph(ReadGraph &graph) {
+  auto identify_sink_from_graph(ReadGraph& graph) {
     for (auto weight = param.MAX_END_OCC; weight >= param.MIN_END_OCC;
          --weight) {
       for (auto ratio = 0.0; ratio < param.MAX_END_LEN_RATIO;
@@ -119,7 +114,6 @@ class ReadAssembler {
     return State::ASSEMBLE_FAILED;
   }
 
-
   /**
    * @brief Assembles a read from a sequence of kmers.
    *
@@ -138,9 +132,8 @@ class ReadAssembler {
    * read could be assembled.
    */
   auto assemble_read(const std::size_t kmer_size) {
-    
     auto graph = ReadGraph(kmer_size, read_len * param.ASSEMBLE_MAX_LEN_RATIO);
-    for (const auto &seq : sequences) {
+    for (const auto& seq : sequences) {
       graph.add_seq(seq.seq, seq.left_bound);
     }
     auto sources = identify_source_from_graph(graph);
@@ -170,100 +163,107 @@ class ReadAssembler {
       for (auto sink : sinks | std::views::take(2)) {
         auto forward_read = graph.find_read<false>(source, sink);
         switch (get_read_state(forward_read)) {
-        case State::ASSEMBLE_TOO_LONG:
-        case State::ASSEMBLE_SUCCESS:
-          return forward_read;
-        case State::ASSEMBLE_TOO_SHORT:
-          if (forward_read.size() > longest_read.size()) {
-            longest_read = std::move(forward_read);
-          }
-          break;
-        case State::ASSEMBLE_FAILED:
-          break;
+          case State::ASSEMBLE_TOO_LONG:
+          case State::ASSEMBLE_SUCCESS:
+            return forward_read;
+          case State::ASSEMBLE_TOO_SHORT:
+            if (forward_read.size() > longest_read.size()) {
+              longest_read = std::move(forward_read);
+            }
+            break;
+          case State::ASSEMBLE_FAILED:
+            break;
         }
 
         auto reverse_read = graph.find_read<true>(sink, source);
         switch (get_read_state(reverse_read)) {
-        case State::ASSEMBLE_TOO_LONG:
-        case State::ASSEMBLE_SUCCESS:
-          return reverse_read;
-        case State::ASSEMBLE_TOO_SHORT:
-          if (reverse_read.size() > longest_read.size()) {
-            longest_read = std::move(reverse_read);
-          }
-          break;
-        case State::ASSEMBLE_FAILED:
-          break;
+          case State::ASSEMBLE_TOO_LONG:
+          case State::ASSEMBLE_SUCCESS:
+            return reverse_read;
+          case State::ASSEMBLE_TOO_SHORT:
+            if (reverse_read.size() > longest_read.size()) {
+              longest_read = std::move(reverse_read);
+            }
+            break;
+          case State::ASSEMBLE_FAILED:
+            break;
         }
       }
     }
     return longest_read;
   }
 
-public:
+ public:
   ReadAssembler(const std::size_t read_len) { this->read_len = read_len; }
 
   // delete copy constructor and copy assignment
-  ReadAssembler(const ReadAssembler &) = delete;
+  ReadAssembler(const ReadAssembler&) = delete;
 
-  ReadAssembler &operator=(const ReadAssembler &) = delete;
-  
+  ReadAssembler& operator=(const ReadAssembler&) = delete;
+
   /* move constructor */
-  ReadAssembler(ReadAssembler &&rhs) {
+  ReadAssembler(ReadAssembler&& rhs) {
     read_len = rhs.read_len;
     sequences = std::move(rhs.sequences);
   }
 
   /* move assignment */
-  ReadAssembler &operator=(ReadAssembler &&rhs) {
+  ReadAssembler& operator=(ReadAssembler&& rhs) {
     read_len = rhs.read_len;
     sequences = std::move(rhs.sequences);
     return *this;
   }
 
-  template<class T>
+  /**
+   * @brief Adds a sequence to the list of sequences.
+   *
+   * This function adds a sequence to the list of sequences. If the type of the
+   * sequence is bio::istring, it is directly added to the list. Otherwise, a
+   * new Sequence<bio::istring> object is created with the provided sequence
+   * information and added to the list.
+   *
+   * @tparam T The type of the sequence.
+   * @param seq The sequence to be added.
+   */
+  template <class T>
   auto add_seq(const Sequence<T>& seq) {
     if constexpr (std::is_same_v<T, bio::istring>) {
       sequences.push_back(seq);
     } else {
       sequences.emplace_back(Sequence<bio::istring>{
-        seq.read_id, 
-        seq.left_bound, 
-        seq.right_bound, 
-        bio::Codec::to_istring(seq.seq),
-        seq.qual,
-        seq.forward_strain
-      });
+          seq.read_id, seq.left_bound, seq.right_bound,
+          bio::Codec::to_istring(seq.seq), seq.qual, seq.forward_strain});
     }
   }
 
   auto assemble() {
-
     auto kmer_size = std::ceil(std::log2(read_len) * 2.5);
-    // TODO: adjust it by coverage of fragments or something else
+
+    /* For each iteration, increase kmer_size */
     for (std::size_t i = 0; i < param.MAX_ITERATIONS; ++i) {
       // spdlog::debug("Assemble: kmer_size = {}", kmer_size);
       auto failed = false;
       auto corrected_read = assemble_read(kmer_size);
 
       switch (get_read_state(corrected_read)) {
-      case State::ASSEMBLE_SUCCESS:
-        return corrected_read;
-      case State::ASSEMBLE_TOO_LONG:
-      case State::ASSEMBLE_TOO_SHORT:
-        // spdlog::debug("Assemble read length({}) is not ideal({} - {}),
-        // increase "
-        //               "kmer size({})",
-        //               corrected_read.size(),
-        //               std::size_t(read_len * param.ASSEMBLE_TOO_SHORT_RATIO),
-        //               std::size_t(read_len * param.ASSEMBLE_MAX_LEN_RATIO),
-        //               kmer_size + param.INCREASE_KMER_SIZE);
-        kmer_size += param.INCREASE_KMER_SIZE;
-        break;
-      case State::ASSEMBLE_FAILED:
-        failed = true;
-        // spdlog::debug("Assemble failed");
-        break;
+        case State::ASSEMBLE_SUCCESS:
+          return corrected_read;
+        case State::ASSEMBLE_TOO_LONG:
+        case State::ASSEMBLE_TOO_SHORT:
+          // spdlog::debug("Assemble read length({}) is not ideal({} - {}),
+          // increase "
+          //               "kmer size({})",
+          //               corrected_read.size(),
+          //               std::size_t(read_len *
+          //               param.ASSEMBLE_TOO_SHORT_RATIO), std::size_t(read_len
+          //               * param.ASSEMBLE_MAX_LEN_RATIO), kmer_size +
+          //               param.INCREASE_KMER_SIZE);
+          kmer_size += param.INCREASE_KMER_SIZE;
+          break;
+        case State::ASSEMBLE_FAILED:
+          failed = true;
+          // spdlog::debug("Assemble failed");
+          break;
       }
       if (failed) {
         break;
@@ -329,7 +329,7 @@ public:
 
   auto clear() { sequences.clear(); }
 
-private:
+ private:
   std::size_t read_len;
   std::vector<Sequence<bio::istring>> sequences;
 };

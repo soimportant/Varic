@@ -7,6 +7,7 @@ import argparse
 import shutil
 import gzip
 from resource import *
+import time
 
 TOOL="Canu"
 
@@ -36,7 +37,9 @@ def memory_wrapper(m):
 def run_cmd(cmd, stdout=sys.stdout, stderr=sys.stderr):
   if type(cmd) == str:
     cmd = cmd.split()
-  p = Popen(cmd, stdout=stdout, stderr=stderr)
+    
+  start = time.time()
+  p = Popen(cmd)
   try:
     p.wait()
   except KeyboardInterrupt:
@@ -47,6 +50,7 @@ def run_cmd(cmd, stdout=sys.stdout, stderr=sys.stderr):
   else:
     print("\nYour job is successfully finished\n")
 
+  
   src = getrusage(RUSAGE_CHILDREN)
   print("==========================")
   print("Resource usage of your job")
@@ -75,6 +79,7 @@ def run_cmd(cmd, stdout=sys.stdout, stderr=sys.stderr):
       print(f"{a:{33}}: {f(b)}")
     else:
       print(f"{a:{33}}: {b}")
+  print(f"Time elapsed: {time.time() - start:.4f} s")
 
   return p.returncode
 
@@ -119,10 +124,9 @@ def main():
   running_log="running.log"
   with open(running_log, "w") as f:
     print(f"{TOOL} command =", ' '.join(cmd))
-    proc = Popen(cmd, f, f)
-    proc.wait()
-    if proc.returncode != 0:
-      print(f"Error: {TOOL} failed with exit code {proc.returncode}")
+    returncode = run_cmd(cmd, stdout=f, stderr=f)
+    if returncode != 0:
+      print(f"Error: {TOOL} failed with exit code {returncode}")
       exit(-1)
 
   # copy result to correct directory

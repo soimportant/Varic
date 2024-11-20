@@ -352,11 +352,16 @@ struct ReadGraph {
       } else {
         read += get_first_base(now_kmer);
       }
+      if (read.back() >= 4) {
+        spdlog::debug("Invalid character: \'{}\', code = {}, Reverse = {}", bio::Codec::to_char(read.back()),
+                      int(read.back()), Reverse);
+      }
     }
     if constexpr (Reverse) {
       std::ranges::reverse(read);
     }
-    return bio::Codec::to_string(read);
+    auto res = bio::Codec::to_string(read);
+    return res;
   }
 
 
@@ -461,7 +466,7 @@ struct ReadGraph {
         auto a = decode_kmer_to_seq(prev_kmer).substr(1);
         auto b = decode_kmer_to_seq(now_kmer).substr(0, kmer_size - 1);
         if (a != b) {
-          spdlog::debug("Rev = {}, i = {}, prev = {}, now = {}", Reverse, i,
+          spdlog::debug(">>> Rev = {}, i = {}, prev = {}, now = {}", Reverse, i,
                         bio::Codec::to_string(a), bio::Codec::to_string(b));
           print_path();
           return false;
@@ -470,7 +475,7 @@ struct ReadGraph {
         auto a = decode_kmer_to_seq(prev_kmer).substr(0, kmer_size - 1);
         auto b = decode_kmer_to_seq(now_kmer).substr(1);
         if (a != b) {
-          spdlog::debug("Rev = {}, i = {}, prev = {}, now = {}", Reverse, i,
+          spdlog::debug(">>> Rev = {}, i = {}, prev = {}, now = {}", Reverse, i,
                         bio::Codec::to_string(a), bio::Codec::to_string(b));
           print_path();
           return false;
@@ -694,8 +699,8 @@ struct ReadGraph {
       this->kmer_size = kmer_size;
     }
     this->used_bytes =
-        (kmer_size + BASES_PER_BYTE_UNIT - 1) / BASES_PER_BYTE_UNIT;
-    this->shift_at_last_unit = (kmer_size - 1) % BASES_PER_BYTE_UNIT * 2;
+        (this->kmer_size + BASES_PER_BYTE_UNIT - 1) / BASES_PER_BYTE_UNIT;
+    this->shift_at_last_unit = (this->kmer_size - 1) % BASES_PER_BYTE_UNIT * 2;
     this->max_assemble_len = max_assemble_len;
     this->kmers.reserve(this->max_assemble_len * 2);
   }
@@ -709,6 +714,7 @@ struct ReadGraph {
     return bio::Codec::to_string(seq);
   }
 
+  /* pretty print function -> for debug */
   auto pretty_print(const Vertex& v) {
     return pretty_print(get_kmer(v));
   }
@@ -739,7 +745,7 @@ struct ReadGraph {
     assert(seq.size() <= BASES_PER_BYTE_UNIT);
     auto unit = ByteUnit{0};
     for (auto i = 0u; i < std::min(seq.size(), BASES_PER_BYTE_UNIT); i++) {
-      unit |= ByteUnit(seq[i]) << (i * 2);
+      unit |= ByteUnit(seq[i] & 0b11) << (i * 2);
     }
     return unit;
   }
@@ -752,13 +758,22 @@ struct ReadGraph {
       auto data = encode_seq_to_unit(subseq);
       kmer[i / BASES_PER_BYTE_UNIT] = data;
     }
+    auto check_kmer_validness = [&](const KmerView kmer) {
+      auto last_unit = kmer[used_bytes - 1];
+      last_unit >>= (shift_at_last_unit + 2);
+      if (last_unit != 0) {
+        spdlog::debug("last_unit = {:064b}, kmer_size = {}", last_unit, kmer_size);
+      }
+      return last_unit == 0;
+    };
+    assert(check_kmer_validness(kmer));
     // spdlog::debug("kmer = {}", pretty_print(kmer));
     return kmer;
   }
 
   auto get_base_at_unit(const ByteUnit unit, const std::size_t pos) {
     assert(pos < BASES_PER_BYTE_UNIT);
-    return (unit >> (pos * 2)) & 3;
+    return (unit >> (pos * 2)) & 0b11;
   }
 
   auto get_first_base(const KmerView kmer) -> bio::ichar {
@@ -766,7 +781,15 @@ struct ReadGraph {
   }
 
   auto get_last_base(const KmerView kmer) -> bio::ichar {
-    return kmer[used_bytes - 1] >> shift_at_last_unit;
+    auto res = kmer[used_bytes - 1] >> shift_at_last_unit;
+    if (res >= 4) {
+      auto bits = std::string{};
+      for (int i = 0; i < used_bytes; i++) {
+        bits += fmt::format("{:064b}\n", kmer[i]);
+      }
+      spdlog::debug("res = {}, kmer_size = {}, kmer = \n{}", res, kmer_size, bits);
+    }
+    return (kmer[used_bytes - 1] >> shift_at_last_unit) & 0b11;
   }
 
   /**
@@ -975,7 +998,6 @@ struct ReadGraph {
       // confidence, need to do something like trimmng
       // 1. find the last vertex that has weight > 1
       //   - may reassemble from last vertex
-      //
 
       // for (auto [v, w] : max_path | std::views::reverse |
       // std::views::take(100) | std::views::reverse) {
@@ -994,165 +1016,9 @@ struct ReadGraph {
     // spdlog::debug("after path.size() = {}", path.size());
     return concat_vertices<Reverse>(source, path);
 
-    // auto fail_vertexes = std::set<Vertex>{};
-    // auto stk = std::stack<Vertex>{};
-
-    // stk.emplace(source);
-
-    // while (1) {
-    //   if (stk.empty()) {
-    //     break;
-    //   }
-    //   auto v = stk.top();
-    //   stk.pop();
-    //   // {
-    //   //   spdlog::debug("v = {}, ({} - {}), dep = {}", g[v].kmer,
-    //   *g[v].appearances.begin(),
-    //   //                 *g[v].appearances.rbegin(), path.size());
-    //   //   // spdlog::debug("cnt = {}", cnt);
-    //   // }
-    //   path.emplace_back(v);
-    //   if (v == sink) {
-    //     spdlog::debug("Reach sink {}", g[v].kmer);
-    //     break;
-    //   }
-    //   /* if path.size() >= max_len -> stuck in cycle */
-    //   if (path.size() >= max_len) {
-    //     spdlog::debug("Reach max_len {}", max_len);
-    //     break;
-    //   }
-    //   vis[v] += 1;
-    //   auto out_edges = g.out_edges(v, false);
-    //   std::ranges::sort(out_edges, [this, &vis](const auto &a, const auto &b)
-    //   {
-    //     const auto a_vis_times = std::max(1, vis[g.target(a)]);
-    //     const auto b_vis_times = std::max(1, vis[g.target(b)]);
-    //     return static_cast<double>(g[a].count) / a_vis_times >
-    //            static_cast<double>(g[b].count) / b_vis_times;
-    //   });
-    //   for (const auto& e : out_edges) {
-    //     auto u = g.target(e);
-    //     if (vis[u] >= g[e].count) {
-    //       continue;
-    //     }
-    //     // Don't use this, will skip some vertices when the region is complex
-    //     // if (g[e].count == 1) {
-    //     //   continue;
-    //     // }
-    //     spdlog::debug("now = {}, g[e].kmer count = {}", g[v].kmer,
-    //     g[e].count); stk.push(u); break;
-    //   }
-    // }
-
-    // TODO: we may trim the path by the weight of edge
-    // 1. modify the path structure for storing the edge
-    // 2. For local reassemble, You need to do topologically sort first, get
-    //    the order, then parse the path between two nodes(source and sink)
-    //    locally.
-    // for (auto last = path[0]; const auto& v : path | std::views::drop(1)) {
-    //   if (v == last) {
-    //     continue;
-    //   }
-    //   auto out_edges = g.out_edges(last, false);
-    //   auto weight_sum = std::accumulate(out_edges.begin(), out_edges.end(),
-    //   0.0,
-    //                                     [this](const auto &a, const auto &b)
-    //                                     {
-    //                                       return a + g[b].count;
-    //                                     });
-    //   auto weight_ratio = std::vector<double>(out_edges.size());
-    //   auto branch_cnt = 0;
-    //   for (auto i = 0u; const auto& e : g.out_edges(last, false)) {
-    //     weight_ratio[i++] = g[e].count / weight_sum;
-    //     if (weight_ratio >= 0.5) {
-
-    //     }
-    //   }
-    //   last = v;
-    // }
-
-    // return concat_vertices(path);
-
-    // auto stk = std::stack<std::pair<Vertex, std::size_t>>{};
-    // stk.emplace(source, *g[source].appearances.begin());
-    // while (!stk.empty()) {
-    //   const auto [v, pos] = stk.top();
-    //   stk.pop();
-
-    //   path.push_back(v);
-    //   if (v == sink) {
-    //     spdlog::debug("Reach sink {}", g[v].kmer);
-    //     break;
-    //   }
-    //   vis[v] += 1;
-    //   auto out_edges = g.out_edges(v, false);
-    //   // TODO: can be imporved by use vector of edges -> query vis only once
-    //   std::ranges::sort(out_edges, [this, &vis](const auto &a, const auto &b)
-    //   {
-    //     const auto a_vis_times = std::max(1, vis[g.target(a)]);
-    //     const auto b_vis_times = std::max(1, vis[g.target(b)]);
-    //     return g[a].count / a_vis_times > g[b].count / b_vis_times;
-    //   });
-
-    //   // remember the visis times and divide by visit time?
-    //   // take the
-    //   auto is_nearby = [&](const std::set<std::size_t> &appearances) {
-    //     auto supposed_pos = pos + 1;
-    //     auto it = appearances.lower_bound(supposed_pos);
-    //     if (it == appearances.begin()) {
-    //       if (*it - supposed_pos > param.NEARBY_THRESHOLD) {
-    //         return static_cast<std::size_t>(-1);
-    //       }
-    //       // return *it;
-    //       return (*it + supposed_pos) / 2;
-    //     }
-
-    //     // auto prev_it = std::prev(it);
-    //     // if (it == appearances.end()) {
-    //     //   if (supposed_pos - *prev_it > kmer_size) {
-    //     //     return static_cast<std::size_t>(-1);
-    //     //   }
-    //     //   return *prev_it;
-    //     // }
-
-    //     // if (supposed_pos - *prev_it > kmer_size &&
-    //     //     *it - supposed_pos > kmer_size) {
-    //     //   return static_cast<std::size_t>(-1);
-    //     // }
-
-    //     // if (supposed_pos - *prev_it < *it - supposed_pos) {
-    //     //   return (*prev_it + supposed_pos) / 2;
-    //     //   // return *prev_it;
-    //     // }
-    //     // return (*it + supposed_pos) / 2;
-    //     // // return *it;
-    //   };
-
-    //   // TODO: there's another solution: if the apperances of next kmer has
-    //   for (const auto& e : out_edges) {
-    //     // use pos as nearby is not accurate
-
-    //     auto u = g.target(e);
-    //     stk.emplace(u, pos + 1);
-
-    //     break;
-    //     // if (auto next_pos = is_nearby(g[u].appearances); next_pos != -1) {
-    //     //   stk.emplace(u, next_pos);
-    //     //   break;
-    //     // } else {
-    //     //   spdlog::debug("pos = {}, path.size() = {}, cnt = {}, {}({} - {})
-    //     -> {}({} - {})", pos + 1, path.size(), g[e].count, g[v].kmer,
-    //     //                 *g[v].appearances.begin(),
-    //     *g[v].appearances.rbegin(),
-    //     //                 g[g.target(e)].kmer,
-    //     //                 *g[g.target(e)].appearances.begin(),
-    //     //                 *g[g.target(e)].appearances.rbegin());
-    //     // }
-    //   }
-    // }
-    // return concat_vertices(path);
   }
 
+  // for debug
   // auto print_graphviz(const Path& path) {
   //   auto p = fs::path("/mnt/ec/ness/yolkee/thesis/tests/01_10002.dot");
   //   std::ofstream fout(p);
@@ -1240,8 +1106,10 @@ struct ReadGraph {
 
   /* The underlying graph */
   Graph g;
+
   /* kmer size */
   std::size_t kmer_size;
+  
   /* the array size that store the data, which equal to `kmer_size` /  */
   std::size_t used_bytes;
   std::size_t shift_at_last_unit;

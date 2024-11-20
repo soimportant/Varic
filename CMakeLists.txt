@@ -45,6 +45,7 @@ add_compile_definitions(
   DATA_PATH="/mnt/ec/mammoth/yolkee/thesis/data"
   RESULT_PATH="/mnt/ec/mammoth/yolkee/thesis/result"
   TMP_PATH="/mnt/ec/ness/yolkee/thesis/tmp")
+  
 
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_compile_definitions(DEBUG)
@@ -58,7 +59,7 @@ if ("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang")
   # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++")
 endif()
 
-add_executable(main ${CMAKE_CURRENT_LIST_DIR}/src/main.cpp)
+add_executable(varic ${CMAKE_CURRENT_LIST_DIR}/src/main.cpp)
 # add_executable(fasta2msa ${CMAKE_CURRENT_LIST_DIR}/src/fasta2msa.cpp)
 add_executable(test ${CMAKE_CURRENT_LIST_DIR}/src/test.cpp)
 # add_executable(maf2fa ${CMAKE_CURRENT_LIST_DIR}/src/maf2fa.cpp)

@@ -1,0 +1,124 @@
+#! /usr/bin/python3
+
+from subprocess import *
+import os
+import sys
+import argparse
+import logging
+
+def run_cmd(cmd : list):
+  logging.info(f"Run command: {' '.join(cmd)}")
+  p = run(cmd, stdout=PIPE)
+  if p.returncode != 0:
+    logging.error(f"cmd = {' '.join(cmd)} failed!")
+    exit(-1)
+
+
+def main():
+  logging.basicConfig(level=logging.DEBUG, format="[%(asctime)s %(levelname)s] %(message)s")
+  parser = argparse.ArgumentParser(prog="simulate_snp_genome",
+                                   description="Simulate SNP genome by simuG and pbsim")
+  parser.add_argument("-r", "--ref",
+                      dest="ref", type=str,
+                      required=True,
+                      help="Path of reference genome that used to simulate reads")
+  parser.add_argument("-p", "--prefix",
+                      dest="prefix", type=str,
+                      required=True,
+                      help="Prefix of simulated read name")
+  parser.add_argument("-m", "--method",
+                      dest="method", type=str,
+                      required=True,
+                      choices=["qs", "err"])
+  parser.add_argument("-d", "--depth",
+                      dest="depth", type=int,
+                      help="Coverage depths of simulated reads")
+  parser.add_argument("-o",
+                      dest="output_dir", type=str,
+                      required=True,
+                      help="directory of output file")
+
+  args = parser.parse_args(sys.argv[1:])
+
+  pbsim_dir = "/mnt/ec/ness/yolkee/thesis/tools/pbsim3"
+  pbsim = f"{pbsim_dir}/src/pbsim"
+
+  ref = args.ref
+  prefix = args.prefix
+
+  if not os.path.exists(ref) or not os.path.isfile(ref):
+    logging.error(f"Reference genome {ref} not exists or not a file.")
+    exit(-1)
+  if depth < 1:
+    logging.error(f"Depth must greater than 1.")
+    exit(-1)
+
+  # pbsim parameter
+  depth = args.depth
+  output_dir = args.output_dir
+  model_dir = f"{pbsim_dir}/data"
+  models = {
+    "qs": {
+      "PacBio": "QSHMM-RSII.model",
+      "ONT": "QSHMM-ONT.model"
+    },
+    "err": {
+      "PacBio": "ERRHMM-RSII.model",
+      "ONT": "ERRHMM-ONT.model"
+    }
+  }
+  
+  # run pbsim for each haplotype
+  reads_dir = f"{output_dir}"
+  os.makedirs(reads_dir, exist_ok=True)
+  for platform, model in models[args.method].items():
+    method = f"{args.method}hmm"
+    pref = f"{reads_dir}/{platform}"
+    os.makedirs(pref, exist_ok=True)
+    pbsim_cmd = [
+      pbsim,
+      "--strategy", "wgs",
+      "--method", f"{method}",
+      f"--{method}", f"{model_dir}/{model}",
+      "--depth", f"{depth}",
+      "--genome", f"{ref}",
+      "--id-prefix", f"{prefix}",
+      "--prefix", f"{pref}/h{h + 1}_D{depth}"
+    ]
+    run_cmd(pbsim_cmd)
+
+  # use seqkit to merge reads
+  for platform in models[args.method].keys():
+    pref = f"{reads_dir}/{platform}"
+    merged_reads = f"{pref}/merged_reads_D{depth}.fastq"
+    concat = [
+      "seqkit",
+      "concat",
+      "-f",
+      "-o", merged_reads,
+    ]
+    concat += [f"{pref}/h{h + 1}_D{depth}_0001.fastq" for h in range(haplotype)]
+    run_cmd(concat)
+  
+  # use minimap2 for calculating overlap on merged read
+  for platform in models[args.method].keys():
+    pref = f"{reads_dir}/{platform}"
+    merged_reads = f"{pref}/merged_reads_D{depth}.fastq"
+    overlap = f"{pref}/merged_reads_D{depth}.overlap.paf"
+    if platform == "PacBio":
+      platform_str = "ava-pb"
+    elif platform == "ONT":
+      platform_str = "ava-ont"
+    minimap2_cmd = [
+      "minimap2",
+      "-x", f"{platform_str}",
+      "-X",
+      f"{merged_reads}",
+      f"{merged_reads}",
+      "-o", f"{overlap}"
+    ]
+    run_cmd(minimap2_cmd)
+  
+  
+if __name__ == "__main__":
+  main()

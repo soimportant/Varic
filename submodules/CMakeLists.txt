@@ -8,9 +8,14 @@ if(NOT TARGET spdlog)
 endif()
 
 # edlib
-set(EDLIB_ENABLE_INSTALL OFF CACHE BOOL "Generate the install target" FORCE)
-set(EDLIB_BUILD_EXAMPLES OFF CACHE BOOL "Build examples" FORCE)
-set(EDLIB_BUILD_UTILITIES OFF CACHE BOOL "Build utilities" FORCE)
+# set(EDLIB_ENABLE_INSTALL OFF CACHE BOOL "Generate the install target" FORCE)
+# set(EDLIB_BUILD_EXAMPLES OFF CACHE BOOL "Build examples" FORCE)
+# set(EDLIB_BUILD_UTILITIES OFF CACHE BOOL "Build utilities" FORCE)
+
+set(EDLIB_ENABLE_INSTALL ON CACHE BOOL "Generate the install target" FORCE)
+set(EDLIB_BUILD_EXAMPLES ON CACHE BOOL "Build examples" FORCE)
+set(EDLIB_BUILD_UTILITIES ON CACHE BOOL "Build utilities" FORCE)
+
 add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/edlib)
 
 
@@ -32,3 +37,6 @@ set_target_properties(tcmalloc PROPERTIES IMPORTED_LOCATION ${GPERFTOOLS_DIR}/li
 
 add_library(profiler SHARED IMPORTED GLOBAL)
 set_target_properties(profiler PROPERTIES IMPORTED_LOCATION ${GPERFTOOLS_DIR}/lib/libprofiler.so)
+
+# indicators
+add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/indicators)

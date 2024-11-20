@@ -1,0 +1,76 @@
+#! /usr/bin/python3
+
+from subprocess import *
+import os
+import sys
+import argparse
+
+
+def main():
+  parser = argparse.ArgumentParser(prog="simulate_read")
+  parser.add_argument("-r",
+                      dest="ref", type=str,
+                      required=True,
+                      help="Path of reference genome")
+  parser.add_argument("-m", "--method",
+                      dest="method", type=str,
+                      required=True,
+                      choices=["qs", "err"])
+  parser.add_argument("-p", "--id_prefix",
+                      dest="id_prefix", type=str,
+                      required=True,
+                      help="Prefix of read ID")
+  parser.add_argument("-o",
+                      dest="output_dir", type=str,
+                      required=True,
+                      help="directory of output file")
+
+  args = parser.parse_args(sys.argv[1:])
+
+  pbsim3_dir = "/mnt/ec/ness/yolkee/thesis/tools/simulator/pbsim3"
+  pbsim = f"{pbsim3_dir}/src/pbsim"
+  pbsim3_model_dir = f"{pbsim3_dir}/data"
+  pbsim3_models = {
+    "qs": {
+      "PacBio": "QSHMM-RSII.model",
+      "ONT": "QSHMM-ONT.model"
+    },
+    "err": {
+      "PacBio": "ERRHMM-RSII.model",
+      "ONT": "ERRHMM-ONT.model"
+    }
+  }
+  reads_depth = [10, 20, 30, 50, 100]
+
+  ref = args.ref
+  id_pref = args.id_prefix
+  output_dir = args.output_dir
+
+  if not os.path.exists(ref) or not os.path.isfile(ref):
+    print(f"Reference genome {ref} not exists or not a file.")
+    exit(-1)
+
+  # run pbsim3
+  for platform, model in pbsim3_models[args.method].items():
+    method = f"{args.method}hmm"
+    for d in reads_depth:
+      path = f"{output_dir}/{platform}/D{d}"
+      os.makedirs(path, exist_ok=True)
+      cmd = [
+        pbsim,
+        "--strategy", "wgs",
+        "--method", f"{method}",
+        f"--{method}", f"{pbsim3_model_dir}/{model}",
+        "--depth", f"{d}",
+        "--genome", f"{ref}",
+        "--id-prefix", f"{id_pref}",
+        "--prefix", f"{output_dir}"
+      ]
+      p = run(cmd, stdout=PIPE)
+      if p.returncode != 0:
+        print(f"cmd = {' '.join(cmd)} failed!")
+        exit(-1)  
+
+
+if __name__ == "__main__":
+  main()

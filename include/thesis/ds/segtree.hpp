@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <vector>
 
+/* modify from https://github.com/the-tourist/algo/blob/master/data/segtree.cpp */
 class segtree {
  public:
   struct node {

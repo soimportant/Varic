@@ -67,6 +67,9 @@ class FragmentedReadCorrector {
      */
     const std::size_t window_extend_len = 25ul;
 
+    /**
+     * alignment score for global and semi-global alignment in SPOA library
+     */
     int match = 5;
     int mismatch = -4;
     int gap = -8;
@@ -75,10 +78,18 @@ class FragmentedReadCorrector {
     /* maximum used sequence when building variation graph */
     int depth = -1;
 
+    /**
+     * The pruned graph should exist a path that length is at least 95% of the
+     * given range of the window
+     */
     double pruned_ratio = 0.95;
 
+    /**
+     * random seed
+     */
     std::int64_t seed = 0;
   } param;
+
 
   /**
    * @brief Initializes the progress bars for different stages of the correction
@@ -150,6 +161,16 @@ class FragmentedReadCorrector {
     }
   }
 
+  /**
+   * @brief Creates windows for all reads.
+   *
+   * This function creates windows for all reads in parallel by iterating over
+   * the reads and calling the make_windows_for_one_read function for each read.
+   * It also calculates the total number of windows, sequences, and sequence
+   * lengths for all reads.
+   *
+   * @return The total number of windows created for all reads.
+   */
   auto make_windows_for_all_read() {
     std::size_t total_windows = 0ul;
     std::size_t total_seqs = 0ul;
@@ -176,8 +197,6 @@ class FragmentedReadCorrector {
         }
         make_window_bar.tick();
       }
-      make_window_bar.set_option(indicators::option::PostfixText{
-          "allocating space for corrected sequences"});
 #pragma omp for
       for (int i = 0; i < take_reads; i++) {
         reads[i].set_fragments_size();
@@ -186,7 +205,7 @@ class FragmentedReadCorrector {
     collect_corrected_seq_bar.set_option(
         indicators::option::MaxProgress(total_windows));
 
-    spdlog::info("building window down, total = {}", total_windows);
+    spdlog::debug("building window down, total = {}", total_windows);
     spdlog::debug("average windows in a read = {:.2f}",
                   static_cast<double>(total_windows) / take_reads);
     spdlog::debug("average sequence inside a window = {:.2f}",
@@ -208,13 +227,16 @@ class FragmentedReadCorrector {
    */
   auto read_preprocess(std::vector<R> raw_reads) {
     preprocess_bar.set_option(
-        indicators::option::PostfixText{"Read preprocessing"});
+      indicators::option::PostfixText{
+        fmt::format("{:30}", "Read preprocessing")
+      }
+    );
 
     reads.resize(raw_reads.size());
     auto need_create_rc = std::vector<std::atomic_bool>(reads.size());
 
     auto identify_valid_read = [&]() {
-      auto valid_read = [&](Read& r) {
+      auto valid_read = [this](Read& r) {
         if (r.seq.size() < param.min_read_length) {
           return false;
         }
@@ -285,14 +307,22 @@ class FragmentedReadCorrector {
   }
 
   /**
-   * @brief
-   * @param raw_reads
-   * @param overlaps
-   * @return
+   * @brief Preprocesses a vector of PafRecords representing overlaps.
+   * 
+   * This function applies various filters and transformations to the input overlaps
+   * to obtain a filtered set of overlaps. The filtering conditions include checking
+   * the validity of the reads, removing self-overlaps, filtering based on match ratio,
+   * and filtering based on overhang length. The filtered overlaps are then sorted
+   * and stored in the class member variable 'overlaps'.
+   * 
+   * @param overlaps The vector of PafRecords representing overlaps to be preprocessed.
    */
   auto overlap_preprocess(std::vector<bio::PafRecord>&& overlaps) {
     preprocess_bar.set_option(
-        indicators::option::PostfixText{"Overlap preprocessing"});
+      indicators::option::PostfixText{
+        fmt::format("{:30}", "Overlap preprocessing")
+      }
+    );
 
     // In original .paf file of overlaps between raw_reads, the match base
     // devided by alignment length is very low, figure out how it be computed
@@ -476,9 +506,13 @@ class FragmentedReadCorrector {
           read_mask[i] = false;
         }
       }
+
+      // get corrected fragments from pruned graph of each window
       auto corrected_fragments = window.get_corrected_fragments(
           global_aln_engine, local_aln_engine, read_mask, param.pruned_ratio,
           param.depth);
+      
+      // assign each corrected fragment to corresponding read
       for (auto& seq : corrected_fragments) {
         auto& overlap_read = reads[seq.read_id];
         if (overlap_read.is_assembled()) {
@@ -489,10 +523,12 @@ class FragmentedReadCorrector {
         if (overlap_read.is_assembled()) {
           bars[1].tick();
           bars[1].set_option(indicators::option::PostfixText{
-              fmt::format("{:2d}/{:6d}", bars[1].current(),
+              fmt::format("{:<4d}/{:<6d}", bars[1].current(),
               filtered_raw_reads_size)});
         }
       }
+
+      // mark window as finished
       read.add_finished_window();
       finished_windows_cnt++;
       if (finished_windows_cnt % 50 == 0) {
@@ -512,14 +548,18 @@ class FragmentedReadCorrector {
       // }
     };
     auto total_windows = make_windows_for_all_read();
-    // std::exit(0);
+    {
 
+    }
+    // std::exit(0);
     // spdlog::info("Build windows for all reads");
     for (auto i = 0u; i < reads.size(); i++) {
       auto& read = reads[i];
       for (auto& w : read.windows) {
-        boost::asio::post(
-            threadpool, [&, w = std::ref(w)]() mutable { window_pipeline(w); });
+        boost::asio::post(threadpool, 
+                          [&, w = std::ref(w)]() mutable { 
+                            window_pipeline(w); 
+                          });
       }
     }
     std::mutex mutex;
@@ -559,15 +599,6 @@ class FragmentedReadCorrector {
     auto futures = std::vector<std::future<bool>>{};
     for (auto i = 0u; i < reads.size(); i++) {
       auto& read = reads[i];
-      // {
-      //   bool found = false;
-      //   if (wanted_read.contains(read.id)) {
-      //     found = true;
-      //   }
-      //   if (!found) {
-      //     continue;
-      //   }
-      // }
       if (read.need_corrected && read.is_assembled()) {
         continue;
       }

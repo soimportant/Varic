@@ -8,7 +8,7 @@ import argparse
 import shutil
 
 # empty for running all
-wanted_tools = ['vechat', 'racon', 'lorma', 'canu']
+wanted_tools = ['canu', 'racon', 'vechat']
 
 def run_cmd(cmd):
   proc = Popen(cmd)
@@ -79,6 +79,7 @@ def main():
       continue
 
     tool_tmp_dir = f"{cwd}/{tool}/tmp"
+    shutil.rmtree(tool_tmp_dir, ignore_errors=True)
     if not os.path.exists(tool_tmp_dir):
       os.mkdir(tool_tmp_dir)
     os.chdir(tool_tmp_dir)
@@ -115,7 +116,7 @@ def main():
     
     print("Start running", tool)
     try:
-      run_cmd(tool_cmd)
+      # run_cmd(tool_cmd)
       run_cmd(eval_cmd)
     #  run_cmd(plot_cmd)
     except Exception as e:

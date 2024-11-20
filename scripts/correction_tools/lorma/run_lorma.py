@@ -6,6 +6,7 @@ import os
 import argparse
 import shutil
 import tempfile
+import time
 from resource import *
 
 TOOL="lorma"
@@ -37,17 +38,19 @@ def memory_wrapper(m):
 def run_cmd(cmd, stdout=sys.stdout, stderr=sys.stderr):
   if type(cmd) == str:
     cmd = cmd.split()
+  start = time.time()
   p = Popen(cmd, stdout=stdout, stderr=stderr)
   try:
     p.wait()
   except KeyboardInterrupt:
     p.kill()
-
+  
   if p.returncode != 0:
     print(f"\nYour job is failed with returncode = {abs(p.returncode)}")
   else:
     print("\nYour job is successfully finished\n")
-
+  
+  print(f"Total use time: {time.time() - start:.4f}")
   src = getrusage(RUSAGE_CHILDREN)
   print("==========================")
   print("Resource usage of your job")
@@ -107,14 +110,12 @@ def main():
     read
   ]
   cmd = [exe] + opts
-  print(f"{TOOL} command =", ' '.join(cmd))
 
   running_log="running.log"
   with open(running_log, "w") as f:
     f.write(f"{TOOL} command = {' '.join(cmd)}\n")
-    proc = Popen(cmd, stdout=f, stderr=f)
-    proc.wait()
-    if proc.returncode != 0:
+    returncode = run_cmd(cmd)
+    if returncode != 0:
       print(f"Error: {TOOL} failed with exit code {proc.returncode}")
       exit(-1)
     else:

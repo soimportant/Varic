@@ -1,0 +1,258 @@
+#! /usr/bin/python3
+
+from subprocess import *
+import os
+import sys
+import argparse
+import logging
+from Bio import SeqIO
+
+def run_cmd(cmd : list, wait_to_finish = True):
+  logging.info(f"Run command: {' '.join(cmd)}")
+  if not wait_to_finish:
+    p = Popen(cmd, stdout=PIPE)
+    return p
+  else:
+    p = run(cmd, stdout=PIPE)
+    if p.returncode != 0:
+      logging.error(f"cmd = {' '.join(cmd)} failed!")
+      exit(-1)
+
+def main():
+  logging.basicConfig(level=logging.DEBUG, format="[%(asctime)s %(levelname)s] %(message)s")
+  parser = argparse.ArgumentParser(prog="simulate_haplotype_and_read",
+                                   description="Simulate SNP genome by simuG and pbsim")
+  parser.add_argument("-r", "--ref",
+                      dest="ref", type=str,
+                      required=True,
+                      help="Path of reference genome that used to introduce SNPs")
+  parser.add_argument("-c", "--haplotype",
+                      dest="haplotype", type=int,
+                      default=1,
+                      help="Number of haplotypes, indicate how many runs for simuG")
+  parser.add_argument("--snp_count",
+                      dest="snp_count", type=int,
+                      default=0,
+                      help="Number of SNPs to introduce for simuG")
+  parser.add_argument("--indel_count",
+                      dest="indel_count", type=int,
+                      default=0,
+                      help="Number of indels to introduce for simuG")
+  parser.add_argument("-t", "--threads",
+                      dest="threads", type=int,
+                      default=1,
+                      help="Number of threads to use for minimap2")
+  parser.add_argument("-m", "--method",
+                      dest="method", type=str,
+                      required=True,
+                      choices=["qs", "err"])
+  parser.add_argument("-o",
+                      dest="output_dir", type=str,
+                      required=True,
+                      help="directory of output file")
+
+  args = parser.parse_args(sys.argv[1:])
+
+  simuG = f"/mnt/ec/ness/yolkee/thesis/tools/simulator/simuG/simuG.pl"
+  pbsim_dir = "/mnt/ec/ness/yolkee/thesis/tools/simulator/pbsim3"
+  pbsim = f"{pbsim_dir}/src/pbsim"
+
+  # simuG paramter
+  ref_path = args.ref
+  haplotype = args.haplotype
+  snp_count = args.snp_count
+  indel_count = args.indel_count
+
+  # pbsim parameter
+  output_dir = args.output_dir
+  model_dir = f"{pbsim_dir}/data"
+  models = {
+    "qs": {
+      "PacBio": "QSHMM-RSII.model",
+      "ONT": "QSHMM-ONT.model"
+    },
+    "err": {
+      "PacBio": "ERRHMM-RSII.model",
+      "ONT": "ERRHMM-ONT.model"
+    }
+  }
+
+  # minimap2 threads
+  threads = args.threads
+
+  if not os.path.exists(ref_path) or not os.path.isfile(ref_path):
+    logging.error(f"Reference genome {ref_path} not exists or not a file.")
+    exit(-1)
+  if haplotype < 1:
+    logging.error(f"Haplotype count must greater than 1.")
+    exit(-1)
+  if snp_count < 0:
+    logging.error(f"SNP count must greater than 0.")
+    exit(-1)
+  if indel_count < 0:
+    logging.error(f"Indel count must greater than 0.")
+    exit(-1)
+  if threads < 1:
+    logging.error(f"Threads must greater than 1.")
+    exit(-1)
+  
+  # run simuG for each haplotype
+  snp_ref_dir = f"{output_dir}/snp_ref"
+  os.makedirs(snp_ref_dir, exist_ok=True)
+  simuG_dir = f"{output_dir}/simuG"
+  os.makedirs(simuG_dir, exist_ok=True)
+
+  for h in range(haplotype):
+    simuG_proc = []
+    ref = SeqIO.read(ref_path, "fasta")
+    length = len(ref.seq)
+    
+    block_len = length // threads
+    snp_block = snp_count // threads
+    indel_block = indel_count // threads
+
+    simuG_proc = []
+    for i in range(threads):
+      pref = f"{simuG_dir}/h{h + 1}_{i}"
+      simuG_cmd = [
+        "perl",
+        simuG,
+        "-r", ref_path,
+        "-snp_count", f"{snp_block}",
+        "-indel_count", f"{indel_block}",
+        "-prefix", pref
+      ]
+      simuG_proc.append(run_cmd(simuG_cmd, False))
+    for proc in simuG_proc:
+      proc.wait()
+
+    # compress vcf    
+    for i in range(threads):
+      pref = f"{simuG_dir}/h{h + 1}_{i}"
+      # run_cmd(["bcftools", "index", "-f", f"{pref}.refseq2simseq.SNP.vcf"])
+      # run_cmd(["bcftools", "index", "-f", f"{pref}.refseq2simseq.INDEL.vcf"])
+      run_cmd(["bgzip", f"{pref}.refseq2simseq.SNP.vcf"])
+      run_cmd(["bgzip", f"{pref}.refseq2simseq.INDEL.vcf"])
+
+    # merge vcf by bcftools
+    snp_vcf_files = [f"{simuG_dir}/h{h + 1}_{i}.refseq2simseq.SNP.vcf.gz" for i in range(threads)]
+    snp_vcf = f"{snp_ref_dir}/h{h + 1}.refseq2simseq.SNP.vcf"
+
+    indel_vcf_files = [f"{simuG_dir}/h{h + 1}_{i}.refseq2simseq.INDEL.vcf.gz" for i in range(threads)]
+    indel_vcf = f"{snp_ref_dir}/h{h + 1}.refseq2simseq.INDEL.vcf"
+
+    bcftools_merge_cmd = ["bcftools", "merge", "-m", "none", "-Ov", "--no-index"] + snp_vcf_files + ["-o", snp_vcf]
+    run_cmd(bcftools_merge_cmd)
+    bcftools_merge_cmd = ["bcftools", "merge", "-m", "none", "-Ov", "--no-index"] + indel_vcf_files + ["-o", indel_vcf]
+    run_cmd(bcftools_merge_cmd)
+
+    # run simuG again with SNP and INDEL to generate new reference
+    pref = f"{snp_ref_dir}/h{h + 1}"
+    simuG_cmd = [
+      "perl",
+      simuG,
+      "-r", ref_path,
+      "-snp_vcf", snp_vcf,
+      "-indel_vcf", indel_vcf,
+      "-prefix", pref
+    ]
+    run_cmd(simuG_cmd)
+  
+  # concat fasta
+  snp_vcf = f"{simuG_dir}/h{h + 1}_{i}.refseq2simseq.SNP.vcf"
+  indel_vcf = f"{simuG_dir}/h{h + 1}_{i}.refseq2simseq.INDEL.vcf"
+
+  os.rmdir(simuG_dir)
+  
+  # run pbsim for each haplotype
+  reads_dir = f"{output_dir}/reads"
+  depths = [10, 20, 50]
+  os.makedirs(reads_dir, exist_ok=True)
+  for platform, model in models[args.method].items():
+    method = f"{args.method}hmm"
+    for h in range(haplotype):
+      genome = f"{snp_ref_dir}/h{h + 1}.simseq.genome.fa"
+      for d in depths:
+        pref = f"{reads_dir}/{platform}/D{d}"
+        os.makedirs(pref, exist_ok=True)
+        pbsim_cmd = [
+          pbsim,
+          "--strategy", "wgs",
+          "--method", f"{method}",
+          f"--{method}", f"{model_dir}/{model}",
+          "--depth", f"{d}",
+          "--genome", f"{genome}",
+          "--id-prefix", f"{h}",
+          "--prefix", f"{pref}/h{h + 1}",
+          "--min-length", "5000",
+        ]
+        run_cmd(pbsim_cmd)
+
+
+  # use seqkit to merge reads
+  for platform in models[args.method].keys():
+    for d in depths:
+      pref = f"{reads_dir}/{platform}/D{d}"
+      merged_reads = f"{pref}/merged_reads.fastq"
+      seqkit_cmd = [
+        "seqkit",
+        "concat",
+        "-f", # full
+        "-o", merged_reads,
+      ]
+      seqkit_cmd += [f"{pref}/h{h + 1}_0001.fastq" for h in range(haplotype)]
+      run_cmd(seqkit_cmd)
+
+
+  # generate perfect read
+  for platform in models[args.method].keys():
+    for d in depths:
+      pref = f"{reads_dir}/{platform}/D{d}"
+      for h in range(haplotype):
+        genome = f"{snp_ref_dir}/h{h + 1}.simseq.genome.fa"
+        maf2fa_cmd = [
+          "/mnt/ec/ness/yolkee/thesis/build/maf2fa",
+          "-r", f"{genome}"
+          "-m", f"{pref}/h{h + 1}_0001.maf",
+          "-o", f"{pref}/h{h + 1}_perfect.fasta"
+        ]
+        run_cmd(maf2fa_cmd)
+
+
+  # use seqkit to merge perfect
+  for platform in models[args.method].keys():
+    for d in depths:
+      pref = f"{reads_dir}/{platform}/D{d}"
+      merged_reads = f"{pref}/merged_perfect_reads.fasta"
+      seqkit_cmd = [
+        "seqkit",
+        "concat",
+        "-f", # full
+        "-o", merged_reads,
+      ]
+      seqkit_cmd += [f"{pref}/h{h + 1}_perfect.fasta" for h in range(haplotype)]
+      run_cmd(seqkit_cmd)    
+  
+  # # use minimap2 for calculating overlap on merged read
+  # for platform in models[args.method].keys():
+  #   for d in depths:
+  #     pref = f"{reads_dir}/{platform}/D{d}"
+  #     merged_reads = f"{pref}/merged_reads.fastq"
+  #     overlap = f"{pref}/merged_reads.overlap.paf"
+  #     if platform == "PacBio":
+  #       platform_str = "ava-pb"
+  #     elif platform == "ONT":
+  #       platform_str = "ava-ont"
+  #     minimap2_cmd = [
+  #       "minimap2",
+  #       "-x", f"{platform_str}",
+  #       "-X",
+  #       f"{merged_reads}",
+  #       f"{merged_reads}",
+  #       "-o", f"{overlap}",
+  #       "-t", f"{threads}"
+  #     ]
+  #     run_cmd(minimap2_cmd)
+  
+if __name__ == "__main__":
+  main()

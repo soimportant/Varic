@@ -77,4 +77,7 @@ def plot_avg_match_len(avg_len):
 
 plot_avg_match_len(df[df["avg_del_len"] > 0]["avg_del_len"])
 
-# %%
+
+# TODO: make it a executable program that can save evaluation plot into a directory
+if __name__ == "__main__":
+  pass

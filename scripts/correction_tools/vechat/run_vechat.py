@@ -11,7 +11,6 @@ from Bio import SeqIO
 
 TOOL="vechat"
 
-
 def time_wrapper(t):
   unit = {
     1000: "s",
@@ -38,6 +37,8 @@ def memory_wrapper(m):
 def run_cmd(cmd, stdout = sys.stdout, stderr = sys.stderr):
   if type(cmd) == str:
     cmd = cmd.split()
+
+  start = time.time()
   p = Popen(cmd, stdout=stdout, stderr=stderr)
   try:
     p.wait()
@@ -77,10 +78,10 @@ def run_cmd(cmd, stdout = sys.stdout, stderr = sys.stderr):
       print(f"{a:{33}}: {f(b)}")
     else:
       print(f"{a:{33}}: {b}")
+  print(f"Elapsed time: {time.time() - start:.4f} s")
 
   return p.returncode
   
-
 
 def main():
   parser = argparse.ArgumentParser(prog="run_vechat")

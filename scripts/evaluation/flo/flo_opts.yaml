@@ -13,8 +13,8 @@
 # If migrating annotations from assembly A to assembly B, A is the source
 # and B is the target. Source and target assemblies are specified as path
 # to the corresponding FASTA files (must end in .fa).
-:source_fa: '/mnt/ec/mammoth/yolkee/thesis/data/Ecoli/K12/snp_ref/h1.simseq.genome.fa'
-:target_fa: '/mnt/ec/mammoth/yolkee/thesis/data/Ecoli/K12/snp_ref/h2.simseq.genome.fa'
+:source_fa: '/mnt/ec/mammoth/yolkee/thesis/data/Ecoli/K12/snp_ref/h2.simseq.genome.fa'
+:target_fa: '/mnt/ec/mammoth/yolkee/thesis/data/Ecoli/K12/snp_ref/h1.simseq.genome.fa'
 
 # Number of processes that will be used to parallelise flo. Ideally, this
 # will be the number of CPU cores you have.

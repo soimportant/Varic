@@ -127,6 +127,20 @@ class Window {
     end = std::min(end + extend_len, max_len);
   }
 
+  /**
+   * @brief Shrinks the capacity of the internal containers to fit their size.
+   *
+   * This function reduces the capacity of the `match_pos_at_query` and
+   * `overlap_seqs` containers to fit their current size. This can be useful to
+   * optimize memory usage when the containers no longer need to hold additional
+   * elements.
+   *
+   * @note This function does not change the size of the containers, only their
+   * capacity. If you want to remove excess elements from the containers, use
+   * the `clear` function.
+   *
+   * @note This function is noexcept, meaning it does not throw any exceptions.
+   */
   auto shrink_to_fit() noexcept {
     match_pos_at_query.shrink_to_fit();
     overlap_seqs.shrink_to_fit();
@@ -193,7 +207,6 @@ class Window {
     /* random shuffle two part */
     std::shuffle(order.begin(), sep, random_engine);
     std::shuffle(sep, order.end(), random_engine);
-
     return order;
   }
 
@@ -236,11 +249,18 @@ class Window {
     };
 
     align_and_push(backbone.seq, backbone.qual, std::make_pair(0, len()));
+    /**
+     * Actually, the effect of changing order of MSA is not that huge for our
+     * method. Use random order is also acceptable.
+     */
     auto msa_order = generate_build_msa_order();
     for (const auto& x : msa_order | std::views::take(depth)) {
       align_and_push(overlap_seqs[x].seq, overlap_seqs[x].qual,
                      match_pos_at_query[x]);
     }
+    
+    // len() -> w
+    // pruned_ratio -> p
     graph = graph.PruneGraph(len() * pruned_ratio);
     return graph;
   }
@@ -253,6 +273,7 @@ class Window {
    * @param local_aln_engine A unique pointer to the local alignment engine.
    * @param mask A vector of boolean values indicating which fragments need to
    * be corrected and collected.
+   * @param pruned_ratio The ratio used to prune the graph (default: 0.95).
    * @param depth The depth of the variation graph (default: -1).
    * @return A vector of corrected fragments.
    */
@@ -268,8 +289,8 @@ class Window {
       return std::vector<Sequence<std::string>>{};
     }
 
-    auto graph =
-        build_variation_graph(global_aln_engine, local_aln_engine, pruned_ratio, depth);
+    auto graph = build_variation_graph(global_aln_engine, local_aln_engine,
+                                       pruned_ratio, depth);
 
     auto get_corrected_fragment = [&](const Sequence<>& seq) {
       // spoa::Alignment -> std::pair<int, int>
@@ -325,6 +346,13 @@ class Window {
   //   spdlog::debug("num_codes = {}\n\n", graph.num_codes());
   // }
 
+  /**
+   * @brief Clears the window by removing all stored data.
+   *
+   * This function clears the window by removing all stored data, including the
+   * match positions at the query and the overlap sequences. After calling this
+   * function, the window will be empty.
+   */
   void clear() {
     // spdlog::debug("Window {} is destructed", idx);
     match_pos_at_query.clear();
