@@ -5,7 +5,7 @@
 #include <spdlog/spdlog.h>
 
 #include <biovoltron/file_io/all.hpp>
-#include <thesis/utility/file_io/read_record.hpp>
+#include <varic/utility/file_io/read_record.hpp>
 
 namespace bio = biovoltron;
 

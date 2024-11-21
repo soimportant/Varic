@@ -14,14 +14,14 @@
 #include <filesystem>
 #include <spoa/spoa.hpp>
 
-// #include "thesis/algo/assemble/read_assembler.hpp"
-#include "thesis/corrector/detail/sequence.hpp"
-#include "thesis/corrector/detail/test_read.hpp"
+// #include "varic/algo/assemble/read_assembler.hpp"
+#include "varic/corrector/detail/sequence.hpp"
+#include "varic/corrector/detail/test_read.hpp"
 
-#include "thesis/format/maf.hpp"
-#include "thesis/format/paf.hpp"
-#include "thesis/utility/file_io/read_record.hpp"
-#include "thesis/utility/threadpool/threadpool.hpp"
+#include "varic/format/maf.hpp"
+#include "varic/format/paf.hpp"
+#include "varic/utility/file_io/read_record.hpp"
+#include "varic/utility/threadpool/threadpool.hpp"
 // #include "utility/all.hpp"
 
 namespace bpo = boost::program_options;

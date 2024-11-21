@@ -14,8 +14,8 @@
 #include <biovoltron/file_io/all.hpp>
 #include <spdlog/spdlog.h>
 
-#include "thesis/utility/format/maf.hpp"
-#include "thesis/utility/format/vcf.hpp"
+#include "varic/utility/format/maf.hpp"
+#include "varic/utility/format/vcf.hpp"
 
 namespace fs = std::filesystem;
 namespace bio = biovoltron;

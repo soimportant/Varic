@@ -9,7 +9,7 @@
 
 #include <biovoltron/file_io/fasta.hpp>
 
-#include "thesis/format/paf.hpp"
+#include "varic/format/paf.hpp"
 
 namespace bio = biovoltron;
 
@@ -151,7 +151,7 @@ class BaseReadCorrector {
     overlaps_size = filtered_overlaps.size();
     std::sort(std::execution::par, filtered_overlaps.begin(),
               filtered_overlaps.end());
-    // auto tmp_file = "/mnt/ec/ness/yolkee/thesis/tests/tmp/filtered_overlap.paf";
+    // auto tmp_file = "/mnt/ec/ness/yolkee/varic/tests/tmp/filtered_overlap.paf";
     // auto fout = std::ofstream(tmp_file);
     // for (const auto& overlap : filtered_overlaps) {
     //   fout << overlap << std::endl;

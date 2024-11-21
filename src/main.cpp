@@ -8,10 +8,10 @@
 #include <boost/program_options.hpp>
 #include <spoa/spoa.hpp>
 
-#include "thesis/corrector/fragmented_corrector.hpp"
-#include "thesis/format/paf.hpp"
-#include "thesis/utility/file_io/parse.hpp"
-#include "thesis/utility/file_io/read_record.hpp"
+#include "varic/corrector/fragmented_corrector.hpp"
+#include "varic/format/paf.hpp"
+#include "varic/utility/file_io/parse.hpp"
+#include "varic/utility/file_io/read_record.hpp"
 
 namespace bpo = boost::program_options;
 namespace fs = std::filesystem;

@@ -15,7 +15,7 @@
 #include <biovoltron/utility/istring.hpp>
 #include <spoa/spoa.hpp>
 
-#include "thesis/corrector/detail/sequence.hpp"
+#include "varic/corrector/detail/sequence.hpp"
 
 auto get_local_alignment_engine(const std::size_t max_length = 0,
                                 const std::size_t match = 5,

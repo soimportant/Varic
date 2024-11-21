@@ -7,9 +7,9 @@
 #include <biovoltron/file_io/all.hpp>
 #include <biovoltron/utility/istring.hpp>
 
-#include "thesis/format/maf.hpp"
-#include "thesis/utility/file_io/parse.hpp"
-#include "thesis/utility/file_io/read_record.hpp"
+#include "varic/format/maf.hpp"
+#include "varic/utility/file_io/parse.hpp"
+#include "varic/utility/file_io/read_record.hpp"
 
 namespace bio = biovoltron;
 namespace fs = std::filesystem;

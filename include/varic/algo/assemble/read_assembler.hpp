@@ -3,8 +3,8 @@
 #include <cmath>
 #include <string_view>
 
-#include "thesis/corrector/detail/sequence.hpp"
-#include "thesis/ds/graph/read_graph.hpp"
+#include "varic/corrector/detail/sequence.hpp"
+#include "varic/ds/graph/read_graph.hpp"
 
 class ReadAssembler {
   enum State {

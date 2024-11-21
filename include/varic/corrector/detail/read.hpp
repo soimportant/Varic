@@ -10,11 +10,11 @@
 #include <spdlog/spdlog.h>
 #include <biovoltron/file_io/fasta.hpp>
 
-#include "thesis/algo/assemble/read_assembler.hpp"
-#include "thesis/corrector/detail/overlap.hpp"
-#include "thesis/corrector/detail/sequence.hpp"
-#include "thesis/corrector/detail/window.hpp"
-#include "thesis/ds/segtree.hpp"
+#include "varic/algo/assemble/read_assembler.hpp"
+#include "varic/corrector/detail/overlap.hpp"
+#include "varic/corrector/detail/sequence.hpp"
+#include "varic/corrector/detail/window.hpp"
+#include "varic/ds/segtree.hpp"
 
 namespace bio = biovoltron;
 

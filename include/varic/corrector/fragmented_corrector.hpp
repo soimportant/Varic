@@ -25,10 +25,10 @@
 #include <spoa/spoa.hpp>
 
 #include "indicators/indeterminate_progress_bar.hpp"
-#include "thesis/corrector/detail/overlap.hpp"
-#include "thesis/corrector/detail/read.hpp"
-#include "thesis/corrector/detail/window.hpp"
-#include "thesis/format/paf.hpp"
+#include "varic/corrector/detail/overlap.hpp"
+#include "varic/corrector/detail/read.hpp"
+#include "varic/corrector/detail/window.hpp"
+#include "varic/format/paf.hpp"
 
 template <class R>
   requires std::derived_from<R, bio::FastaRecord<R::encoded>>
@@ -633,7 +633,7 @@ class FragmentedReadCorrector {
   auto correct() {
     collect_corrected_fragments();
     // {
-    //   auto dir = fs::path("/mnt/ec/ness/yolkee/thesis/tmp/fragments");
+    //   auto dir = fs::path("/mnt/ec/ness/yolkee/varic/tmp/fragments");
     //   if (!fs::exists(dir)) {
     //     fs::create_directories(dir);
     //   } else {
